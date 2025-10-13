@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Attendance System - Enhanced</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎥 Facial Recognition Attendance System</h1>
+            <p class="subtitle">Enhanced - Multi-Camera | Image Upload | Unknown Management</p>
+            <div class="warning">
+                ⚠️ Demo Only - Not Production Ready - No Authentication
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Video Section -->
+            <div class="video-section">
+                <!-- Camera Source Selection -->
+                <div class="camera-controls">
+                    <div class="control-group">
+                        <label>Camera Source:</label>
+                        <select id="cameraSource">
+                            <option value="browser">Browser Webcam</option>
+                            <option value="rtsp">RTSP Stream</option>
+                            <option value="http">HTTP/IP Camera</option>
+                        </select>
+                    </div>
+                    
+                    <div id="browserCameraOptions" class="camera-option">
+                        <select id="webcamSelect">
+                            <option value="0">Camera 0 (Default)</option>
+                        </select>
+                        <button id="discoverCameras" class="btn btn-secondary btn-sm">🔍 Discover</button>
+                    </div>
+                    
+                    <div id="rtspOptions" class="camera-option" style="display:none;">
+                        <input type="text" id="rtspUrl" placeholder="rtsp://username:password@192.168.1.100:554/stream1" />
+                        <button id="testRtsp" class="btn btn-secondary btn-sm">Test</button>
+                        <small style="color: #666; font-size: 0.8em; width: 100%;">Example: rtsp://admin:pass@192.168.1.100:554/stream</small>
+                    </div>
+                    
+                    <div id="httpOptions" class="camera-option" style="display:none;">
+                        <input type="text" id="httpUrl" placeholder="http://192.168.1.100:8080/video.mjpg" />
+                        <small style="color: #666; font-size: 0.8em; width: 100%;">Example: http://192.168.1.100/mjpeg or http://camera.local/video</small>
+                    </div>
+                </div>
+
+                <div class="video-container">
+                    <video id="video" autoplay playsinline></video>
+                    <canvas id="overlay"></canvas>
+                    <canvas id="capture" style="display: none;"></canvas>
+                </div>
+
+                <div class="controls">
+                    <button id="startBtn" class="btn btn-primary">Start Camera</button>
+                    <button id="stopBtn" class="btn btn-secondary" disabled>Stop Camera</button>
+                    <button id="toggleRecognition" class="btn btn-success" disabled>
+                        Start Recognition
+                    </button>
+                    <button id="capturePhoto" class="btn btn-info" disabled>📸 Capture Photo</button>
+                    <span id="status" class="status">Camera: Off</span>
+                </div>
+
+                <div class="settings">
+                    <label>
+                        Frame Interval (ms):
+                        <input type="number" id="intervalInput" value="1000" min="100" max="5000" step="100">
+                    </label>
+                    <label>
+                        Threshold:
+                        <input type="number" id="thresholdInput" value="0.6" min="0" max="1" step="0.05">
+                    </label>
+                </div>
+            </div>
+
+            <!-- Sidebar -->
+            <div class="sidebar">
+                <!-- Admin Controls -->
+                <div class="card">
+                    <h3>Admin Controls</h3>
+                    <button id="seedBtn" class="btn btn-info">Seed Demo People</button>
+                    <button id="clearBtn" class="btn btn-danger">Clear All Data</button>
+                    <button id="refreshPeople" class="btn btn-secondary">Refresh People</button>
+                </div>
+
+                <!-- Add Person -->
+                <div class="card">
+                    <h3>Add Person</h3>
+                    <div class="form-group">
+                        <input type="text" id="personName" placeholder="Full Name" class="input-field" />
+                        <input type="text" id="personId" placeholder="ID (e.g., EMP-001)" class="input-field" />
+                    </div>
+                    <div class="button-group">
+                        <button id="uploadImageBtn" class="btn btn-success btn-sm">📁 Upload Photo</button>
+                        <button id="capturePersonBtn" class="btn btn-primary btn-sm">📸 Use Camera</button>
+                    </div>
+                    <input type="file" id="imageUpload" accept="image/*" style="display:none" />
+                </div>
+
+                <!-- Image Compare -->
+                <div class="card">
+                    <h3>Compare Image</h3>
+                    <button id="uploadCompareBtn" class="btn btn-info btn-sm">📁 Upload & Compare</button>
+                    <input type="file" id="compareUpload" accept="image/*" style="display:none" />
+                    <div id="compareResult" class="compare-result"></div>
+                </div>
+
+                <!-- Known People -->
+                <div class="card">
+                    <h3>Known People (<span id="peopleCount">0</span>)</h3>
+                    <div id="peopleList" class="people-list">
+                        <p class="empty-state">No people registered.</p>
+                    </div>
+                </div>
+
+                <!-- Unknown Faces -->
+                <div class="card">
+                    <h3>Unknown Faces (<span id="unknownCount">0</span>)</h3>
+                    <button id="refreshUnknown" class="btn btn-secondary btn-sm">Refresh</button>
+                    <div id="unknownList" class="unknown-list">
+                        <p class="empty-state">No unknown faces detected.</p>
+                    </div>
+                </div>
+
+                <!-- Attendance Log -->
+                <div class="card">
+                    <h3>Recent Attendance</h3>
+                    <button id="refreshAttendance" class="btn btn-secondary btn-sm">Refresh</button>
+                    <div id="attendanceList" class="attendance-list">
+                        <p class="empty-state">No attendance records yet.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Statistics -->
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Faces Detected</div>
+                <div class="stat-value" id="facesDetected">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Recognized</div>
+                <div class="stat-value" id="facesRecognized">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Unknown</div>
+                <div class="stat-value" id="facesUnknown">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Last Update</div>
+                <div class="stat-value" id="lastUpdate">--:--:--</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="captureModal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>Capture Person Photo</h3>
+            <canvas id="capturedImage"></canvas>
+            <div class="modal-buttons">
+                <button id="confirmCapture" class="btn btn-primary">✓ Use This Photo</button>
+                <button id="cancelCapture" class="btn btn-secondary">✗ Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="migrateModal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>Migrate Unknown Face</h3>
+            <img id="migrateImage" style="max-width:200px;" />
+            <div class="form-group">
+                <label>
+                    <input type="radio" name="migrateOption" value="new" checked /> Create New Person
+                </label>
+                <div id="newPersonFields">
+                    <input type="text" id="migrateName" placeholder="Full Name" class="input-field" />
+                    <input type="text" id="migrateId" placeholder="ID" class="input-field" />
+                </div>
+                <label>
+                    <input type="radio" name="migrateOption" value="existing" /> Add to Existing Person
+                </label>
+                <select id="migratePersonSelect" class="input-field" disabled>
+                    <option value="">Select person...</option>
+                </select>
+            </div>
+            <div class="modal-buttons">
+                <button id="confirmMigrate" class="btn btn-primary">Migrate</button>
+                <button id="cancelMigrate" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>
