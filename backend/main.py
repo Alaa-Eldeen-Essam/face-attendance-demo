@@ -3,8 +3,10 @@ import io
 import base64
 import hashlib
 import logging
+from collections import Counter, deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from contextlib import asynccontextmanager
 from threading import Lock
 
@@ -31,16 +33,34 @@ UNKNOWN_SIMILARITY_THRESHOLD = float(os.getenv("UNKNOWN_SIMILARITY_THRESHOLD", "
 TRACKER_MAX_AGE = int(os.getenv("TRACKER_MAX_AGE", "10"))
 TRACKER_MIN_HITS = int(os.getenv("TRACKER_MIN_HITS", "1"))
 TRACKER_IOU_THRESHOLD = float(os.getenv("TRACKER_IOU_THRESHOLD", "0.3"))
+TRACK_IDENTITY_HISTORY = int(os.getenv("TRACK_IDENTITY_HISTORY", "5"))
+TRACK_IDENTITY_CONFIRM_FRAMES = int(os.getenv("TRACK_IDENTITY_CONFIRM_FRAMES", "3"))
+UNKNOWN_CONFIRM_FRAMES = int(os.getenv("UNKNOWN_CONFIRM_FRAMES", "5"))
+IDENTITY_LOCK_MIN_SCORE = float(os.getenv("IDENTITY_LOCK_MIN_SCORE", "0.50"))
 
 # Global runtime state
 recognizer: Optional[FaceRecognizer] = None
 face_trackers: Dict[str, FaceTracker] = {}
+track_identity_states: Dict[str, Dict[int, "TrackIdentityState"]] = {}
 trackers_lock = Lock()
 logger = logging.getLogger("face_attendance_demo")
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
+
+
+@dataclass
+class TrackIdentityState:
+    """Recognition history for one tracked face."""
+
+    history: deque = field(default_factory=lambda: deque(maxlen=TRACK_IDENTITY_HISTORY))
+    confirmed_person: Optional[Dict] = None
+    confirmed_score: float = 0.0
+    unknown_hits: int = 0
+    unknown_id: Optional[int] = None
+    last_seen_frame: int = 0
+    last_logged_person_id: Optional[int] = None
 
 # Request/Response Models
 class AddPersonRequest(BaseModel):
@@ -123,6 +143,10 @@ async def health_check():
             "active_streams": len(face_trackers),
             "max_age": TRACKER_MAX_AGE,
             "iou_threshold": TRACKER_IOU_THRESHOLD,
+            "identity_history": TRACK_IDENTITY_HISTORY,
+            "identity_confirm_frames": TRACK_IDENTITY_CONFIRM_FRAMES,
+            "unknown_confirm_frames": UNKNOWN_CONFIRM_FRAMES,
+            "identity_lock_min_score": IDENTITY_LOCK_MIN_SCORE,
         }
     }
 
@@ -139,6 +163,26 @@ def update_tracked_faces(stream_id: str, faces: List[Dict]) -> List[Dict]:
             face_trackers[stream_id] = tracker
             logger.info("Created face tracker stream_id=%s", stream_id)
         return tracker.update(faces)
+
+def get_active_track_ids(stream_id: str) -> set:
+    with trackers_lock:
+        tracker = face_trackers.get(stream_id)
+        if tracker is None:
+            return set()
+        return set(tracker.active_track_ids())
+
+def cleanup_identity_states(stream_id: str) -> None:
+    active_ids = get_active_track_ids(stream_id)
+    states = track_identity_states.get(stream_id)
+    if not states:
+        return
+
+    stale_ids = [track_id for track_id in states if track_id not in active_ids]
+    for track_id in stale_ids:
+        del states[track_id]
+
+    if not states:
+        track_identity_states.pop(stream_id, None)
 
 def embedding_to_vector(embedding: np.ndarray) -> List[float]:
     """Convert InsightFace output into a pgvector-compatible float list."""
@@ -162,7 +206,7 @@ def find_best_person_match(db, embedding: np.ndarray):
     
     person, sample, distance_value = row
     similarity = 1.0 - float(distance_value)
-    logger.info(
+    logger.debug(
         "Nearest match person_id=%s sample_id=%s name=%s similarity=%.4f threshold=%.4f",
         person.id,
         sample.id,
@@ -206,6 +250,167 @@ def build_unknown_response(db, bbox: List[int], best_match, best_score: float, u
     if unk_id is not None:
         response["unk_id"] = unk_id
     return response
+
+def build_candidate_response(bbox: List[int], best_match, best_score: float, embedding: np.ndarray) -> Dict:
+    result = {
+        "bbox": [int(x) for x in bbox],
+        "candidate_score": float(best_score) if best_match else 0.0,
+        "_embedding": embedding,
+    }
+    if best_match:
+        result.update({
+            "candidate_person_id": best_match.id,
+            "candidate_name": best_match.name,
+            "candidate_identifier": best_match.identifier,
+            "best_match_name": best_match.name,
+            "best_match_identifier": best_match.identifier,
+            "best_match_score": float(best_score),
+            "threshold": SIMILARITY_THRESHOLD,
+        })
+    return result
+
+def get_confirmed_identity(state: TrackIdentityState) -> Tuple[Optional[Dict], float, int]:
+    valid = [
+        item for item in state.history
+        if item is not None and item["score"] >= IDENTITY_LOCK_MIN_SCORE
+    ]
+    if not valid:
+        return None, 0.0, 0
+
+    counts = Counter(item["person_id"] for item in valid)
+    person_id, hits = counts.most_common(1)[0]
+    if hits < TRACK_IDENTITY_CONFIRM_FRAMES:
+        return None, 0.0, hits
+
+    matching = [item for item in valid if item["person_id"] == person_id]
+    avg_score = sum(item["score"] for item in matching) / len(matching)
+    latest = matching[-1]
+    return {
+        "person_id": latest["person_id"],
+        "name": latest["name"],
+        "identifier": latest["identifier"],
+    }, avg_score, hits
+
+def apply_identity_smoothing(db, stream_id: str, tracked_faces: List[Dict], frame) -> List[Dict]:
+    """Confirm identities over multiple frames before attendance/unknown actions."""
+    states = track_identity_states.setdefault(stream_id, {})
+    smoothed = []
+
+    for face in tracked_faces:
+        track_id = face.get("track_id")
+        bbox = face["bbox"]
+        candidate_person_id = face.get("candidate_person_id")
+        candidate_score = float(face.get("candidate_score", 0.0))
+        candidate = None
+
+        if (
+            candidate_person_id is not None
+            and candidate_score >= SIMILARITY_THRESHOLD
+            and candidate_score >= IDENTITY_LOCK_MIN_SCORE
+        ):
+            candidate = {
+                "person_id": candidate_person_id,
+                "name": face["candidate_name"],
+                "identifier": face["candidate_identifier"],
+                "score": candidate_score,
+            }
+
+        if track_id is None:
+            smoothed.append(build_unknown_response(db, bbox, None, candidate_score))
+            continue
+
+        state = states.setdefault(track_id, TrackIdentityState())
+        state.history.append(candidate)
+
+        confirmed, confirmed_score, confirm_hits = get_confirmed_identity(state)
+        if confirmed:
+            state.confirmed_person = confirmed
+            state.confirmed_score = confirmed_score
+            state.unknown_hits = 0
+            record_attendance(
+                db,
+                confirmed["person_id"],
+                confirmed["name"],
+                confirmed["identifier"],
+            )
+
+            response = {
+                "known": True,
+                "person_id": confirmed["person_id"],
+                "name": confirmed["name"],
+                "identifier": confirmed["identifier"],
+                "bbox": [int(x) for x in bbox],
+                "score": float(confirmed_score),
+                "track_id": track_id,
+                "track_age": face.get("track_age"),
+                "track_hits": face.get("track_hits"),
+                "identity_confirmed": True,
+                "identity_hits": confirm_hits,
+            }
+            if state.last_logged_person_id != confirmed["person_id"]:
+                logger.info(
+                    "Track identity confirmed stream=%s track=%s person=%s score=%.3f hits=%s/%s",
+                    stream_id,
+                    track_id,
+                    confirmed["name"],
+                    confirmed_score,
+                    confirm_hits,
+                    TRACK_IDENTITY_HISTORY,
+                )
+                state.last_logged_person_id = confirmed["person_id"]
+        else:
+            state.unknown_hits = state.unknown_hits + 1 if candidate is None else 0
+            response = build_unknown_response(
+                db,
+                bbox,
+                None,
+                candidate_score,
+                state.unknown_id,
+            )
+            response.update({
+                "track_id": track_id,
+                "track_age": face.get("track_age"),
+                "track_hits": face.get("track_hits"),
+                "identity_confirmed": False,
+                "identity_hits": confirm_hits,
+                "unknown_hits": state.unknown_hits,
+                "unknown_confirm_frames": UNKNOWN_CONFIRM_FRAMES,
+            })
+
+            if face.get("candidate_name"):
+                response.update({
+                    "best_match_name": face["candidate_name"],
+                    "best_match_identifier": face["candidate_identifier"],
+                    "best_match_score": candidate_score,
+                    "threshold": SIMILARITY_THRESHOLD,
+                })
+
+            if state.unknown_hits >= UNKNOWN_CONFIRM_FRAMES and state.unknown_id is None:
+                state.unknown_id = save_unknown_face(db, frame, bbox, face["_embedding"])
+                response["unk_id"] = state.unknown_id
+                logger.info(
+                    "Track unknown confirmed stream=%s track=%s unknown_id=%s hits=%s/%s",
+                    stream_id,
+                    track_id,
+                    state.unknown_id,
+                    state.unknown_hits,
+                    UNKNOWN_CONFIRM_FRAMES,
+                )
+
+            logger.debug(
+                "Track pending stream=%s track=%s candidate=%s score=%.3f identity_hits=%s unknown_hits=%s",
+                stream_id,
+                track_id,
+                face.get("candidate_name"),
+                candidate_score,
+                confirm_hits,
+                state.unknown_hits,
+            )
+
+        smoothed.append(response)
+
+    cleanup_identity_states(stream_id)
+    return smoothed
 
 def find_similar_unknown(db, embedding: np.ndarray, threshold: float, detected_after: Optional[datetime] = None):
     """Find a similar unknown face using pgvector cosine distance."""
@@ -571,6 +776,7 @@ async def process_frame(file: UploadFile = File(...)):
         
         if not faces:
             update_tracked_faces("browser", [])
+            cleanup_identity_states("browser")
             return {"faces": [], "message": "No faces detected"}
         
         db = SessionLocal()
@@ -581,31 +787,20 @@ async def process_frame(file: UploadFile = File(...)):
                 embedding = face['embedding']
 
                 best_match, best_score = find_best_person_match(db, embedding)
-                
-                if best_match and best_score >= SIMILARITY_THRESHOLD:
-                    record_attendance(db, best_match.id, best_match.name, best_match.identifier)
-                    
-                    results.append({
-                        "known": True,
-                        "person_id": best_match.id,
-                        "name": best_match.name,
-                        "identifier": best_match.identifier,
-                        "bbox": [int(x) for x in bbox],
-                        "score": float(best_score)
-                    })
-                else:
-                    unk_id = save_unknown_face(db, img, bbox, embedding)
-                    results.append(build_unknown_response(db, bbox, best_match, best_score, unk_id))
+                results.append(build_candidate_response(bbox, best_match, best_score, embedding))
             
             tracked_results = update_tracked_faces("browser", results)
+            smoothed_results = apply_identity_smoothing(db, "browser", tracked_results, img)
             logger.info(
-                "Processed browser frame detected=%s tracked=%s",
+                "Processed browser frame detected=%s tracked=%s confirmed=%s pending=%s",
                 len(results),
                 len(tracked_results),
+                sum(1 for face in smoothed_results if face.get("known")),
+                sum(1 for face in smoothed_results if not face.get("known")),
             )
             
             db.commit()
-            return {"faces": tracked_results}
+            return {"faces": smoothed_results}
             
         finally:
             db.close()
@@ -1027,6 +1222,7 @@ async def process_camera_frame(camera_id: str):
         
         if not faces:
             update_tracked_faces(f"camera:{camera_id}", [])
+            cleanup_identity_states(f"camera:{camera_id}")
             return {
                 "faces": [], 
                 "message": "No faces detected", 
@@ -1051,33 +1247,22 @@ async def process_camera_frame(camera_id: str):
                     ]
 
                 best_match, best_score = find_best_person_match(db, embedding)
-                
-                if best_match and best_score >= SIMILARITY_THRESHOLD:
-                    record_attendance(db, best_match.id, best_match.name, best_match.identifier)
-                    
-                    results.append({
-                        "known": True,
-                        "person_id": best_match.id,
-                        "name": best_match.name,
-                        "identifier": best_match.identifier,
-                        "bbox": bbox,
-                        "score": float(best_score)
-                    })
-                else:
-                    unk_id = save_unknown_face(db, frame, bbox, embedding)
-                    results.append(build_unknown_response(db, bbox, best_match, best_score, unk_id))
+                results.append(build_candidate_response(bbox, best_match, best_score, embedding))
             
             tracked_results = update_tracked_faces(f"camera:{camera_id}", results)
+            smoothed_results = apply_identity_smoothing(db, f"camera:{camera_id}", tracked_results, frame)
             logger.info(
-                "Processed camera frame camera_id=%s detected=%s tracked=%s",
+                "Processed camera frame camera_id=%s detected=%s tracked=%s confirmed=%s pending=%s",
                 camera_id,
                 len(results),
                 len(tracked_results),
+                sum(1 for face in smoothed_results if face.get("known")),
+                sum(1 for face in smoothed_results if not face.get("known")),
             )
             
             db.commit()
             return {
-                "faces": tracked_results, 
+                "faces": smoothed_results, 
                 "camera_id": camera_id,
                 "frame_size": {"width": original_width, "height": original_height}
             }

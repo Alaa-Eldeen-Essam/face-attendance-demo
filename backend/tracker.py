@@ -83,6 +83,9 @@ class FaceTracker:
     def active_count(self) -> int:
         return len(self.tracks)
 
+    def active_track_ids(self) -> List[int]:
+        return [track.id for track in self.tracks]
+
     def _match(self, detection_boxes: List[List[int]]) -> Tuple[List[Tuple[int, int]], List[int]]:
         if not self.tracks:
             return [], list(range(len(detection_boxes)))

@@ -629,7 +629,7 @@ function drawRecognitionOverlay(data) {
     
     // Update lists if needed
     if (data.faces.some(f => f.known)) loadAttendance();
-    if (data.faces.some(f => !f.known)) loadUnknownFaces();
+    if (data.faces.some(f => f.unk_id)) loadUnknownFaces();
 }
 
 // Update startRemoteCameraFrameFetch for display-only mode (no recognition)
@@ -756,7 +756,7 @@ function handleRecognitionResult(data) {
     updateStats();
     
     if (data.faces.some(f => f.known)) loadAttendance();
-    if (data.faces.some(f => !f.known)) loadUnknownFaces();
+    if (data.faces.some(f => f.unk_id)) loadUnknownFaces();
 }
 
 function clearOverlay() {
