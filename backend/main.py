@@ -106,6 +106,48 @@ async def health_check():
         "providers": gpu_info["providers"]
     }
 
+def embedding_to_vector(embedding: np.ndarray) -> List[float]:
+    """Convert InsightFace output into a pgvector-compatible float list."""
+    return np.asarray(embedding, dtype=np.float32).tolist()
+
+def find_best_person_match(db, embedding: np.ndarray):
+    """Find the nearest active person embedding using pgvector cosine distance."""
+    query_vector = embedding_to_vector(embedding)
+    distance = Person.embeddings.cosine_distance(query_vector)
+    row = (
+        db.query(Person, distance.label("distance"))
+        .filter(Person.deleted == False)
+        .order_by(distance)
+        .first()
+    )
+    
+    if not row:
+        return None, 0.0
+    
+    person, distance_value = row
+    similarity = 1.0 - float(distance_value)
+    return person, similarity
+
+def find_similar_unknown(db, embedding: np.ndarray, threshold: float, detected_after: Optional[datetime] = None):
+    """Find a similar unknown face using pgvector cosine distance."""
+    query_vector = embedding_to_vector(embedding)
+    distance = Unknown.embeddings.cosine_distance(query_vector)
+    query = db.query(Unknown, distance.label("distance"))
+    
+    if detected_after is not None:
+        query = query.filter(Unknown.detected_at >= detected_after)
+    
+    row = query.order_by(distance).first()
+    if not row:
+        return None, 0.0
+    
+    unknown, distance_value = row
+    similarity = 1.0 - float(distance_value)
+    if similarity >= threshold:
+        return unknown, similarity
+    
+    return None, similarity
+
 # Person Management Endpoints
 
 @app.post("/add-person/")
@@ -149,7 +191,7 @@ async def add_person(
             name=name,
             identifier=identifier,
             image_data=image_bytes,
-            embeddings=embedding.tobytes(),
+            embeddings=embedding_to_vector(embedding),
             created_at=datetime.utcnow(),
             deleted=False
         )
@@ -214,7 +256,7 @@ async def capture_person(
             name=name,
             identifier=identifier,
             image_data=image_bytes,
-            embeddings=embedding.tobytes(),
+            embeddings=embedding_to_vector(embedding),
             created_at=datetime.utcnow(),
             deleted=False
         )
@@ -259,23 +301,12 @@ async def compare_image(file: UploadFile = File(...)):
         
         db = SessionLocal()
         try:
-            known_people = db.query(Person).filter(Person.deleted == False).all()
-            
             results = []
             for face in faces:
                 bbox = face['bbox']
                 embedding = face['embedding']
                 
-                best_match = None
-                best_score = -1
-                
-                for person in known_people:
-                    stored_embedding = np.frombuffer(person.embeddings, dtype=np.float32)
-                    score = recognizer.compare_embeddings(embedding, stored_embedding)
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_match = person
+                best_match, best_score = find_best_person_match(db, embedding)
                 
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
                     results.append({
@@ -335,7 +366,7 @@ async def seed_demo():
                 name=person_data["name"],
                 identifier=person_data["identifier"],
                 image_data=image_bytes,
-                embeddings=embedding.tobytes(),
+                embeddings=embedding_to_vector(embedding),
                 created_at=datetime.utcnow(),
                 deleted=False
             )
@@ -377,23 +408,12 @@ async def process_frame(file: UploadFile = File(...)):
         
         db = SessionLocal()
         try:
-            known_people = db.query(Person).filter(Person.deleted == False).all()
-            
             results = []
             for face in faces:
                 bbox = face['bbox']
                 embedding = face['embedding']
                 
-                best_match = None
-                best_score = -1
-                
-                for person in known_people:
-                    stored_embedding = np.frombuffer(person.embeddings, dtype=np.float32)
-                    score = recognizer.compare_embeddings(embedding, stored_embedding)
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_match = person
+                best_match, best_score = find_best_person_match(db, embedding)
                 
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
                     record_attendance(db, best_match.id, best_match.name, best_match.identifier)
@@ -484,40 +504,25 @@ def save_unknown_face(db, img, bbox, embedding) -> Optional[int]:
     from datetime import timedelta
     five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
     
-    recent_unknowns = db.query(Unknown).filter(
-        Unknown.detected_at >= five_minutes_ago
-    ).all()
+    recent_unknown, similarity = find_similar_unknown(
+        db,
+        embedding,
+        UNKNOWN_SIMILARITY_THRESHOLD,
+        detected_after=five_minutes_ago,
+    )
+    if recent_unknown:
+        print(f"Duplicate unknown face detected (similarity: {similarity:.3f}), using existing ID: {recent_unknown.id}")
+        return recent_unknown.id
     
-    # Check similarity against recent unknowns
-    for existing in recent_unknowns:
-        existing_embedding = np.frombuffer(existing.embeddings, dtype=np.float32)
-        similarity = recognizer.compare_embeddings(embedding, existing_embedding)
-        
-        # If very similar to recent unknown, don't create duplicate
-        if similarity >= UNKNOWN_SIMILARITY_THRESHOLD:
-            print(f"Duplicate unknown face detected (similarity: {similarity:.3f}), using existing ID: {existing.id}")
-            return existing.id
-    
-    # Also check ALL unknowns with a slightly higher threshold
-    # This prevents duplicates even if time window passed
-    all_unknowns = db.query(Unknown).all()
-    
-    for existing in all_unknowns:
-        if existing in recent_unknowns:
-            continue  # Already checked
-        
-        existing_embedding = np.frombuffer(existing.embeddings, dtype=np.float32)
-        similarity = recognizer.compare_embeddings(embedding, existing_embedding)
-        
-        # Use even higher threshold for old unknowns
-        if similarity >= 0.90:  # 90% similarity
-            print(f"Very similar to existing unknown (similarity: {similarity:.3f}), using existing ID: {existing.id}")
-            return existing.id
+    old_unknown, similarity = find_similar_unknown(db, embedding, 0.90)
+    if old_unknown:
+        print(f"Very similar to existing unknown (similarity: {similarity:.3f}), using existing ID: {old_unknown.id}")
+        return old_unknown.id
     
     # No similar unknown found, create new entry
     unknown = Unknown(
         image_data=image_bytes,
-        embeddings=embedding.tobytes(),
+        embeddings=embedding_to_vector(embedding),
         detected_at=datetime.utcnow()
     )
     db.add(unknown)
@@ -557,8 +562,6 @@ async def migrate_unknown(request: MigrateUnknownRequest):
         unknown = db.query(Unknown).filter(Unknown.id == request.unknown_id).first()
         if not unknown:
             raise HTTPException(status_code=404, detail="Unknown face not found")
-        
-        embedding = np.frombuffer(unknown.embeddings, dtype=np.float32)
         
         if request.person_id:
             person = db.query(Person).filter(Person.id == request.person_id).first()

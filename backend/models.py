@@ -3,6 +3,7 @@ SQLAlchemy models for the attendance system.
 """
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, LargeBinary, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
+from pgvector.sqlalchemy import Vector
 
 Base = declarative_base()
 
@@ -15,7 +16,7 @@ class Person(Base):
     name = Column(String, nullable=False, index=True)
     identifier = Column(String, unique=True, nullable=False, index=True)  # e.g., military ID
     image_data = Column(LargeBinary, nullable=False)  # Stored face photo
-    embeddings = Column(LargeBinary, nullable=False)  # Numpy array as bytes
+    embeddings = Column(Vector(512), nullable=False)
     created_at = Column(DateTime, nullable=False)
     deleted = Column(Boolean, default=False, nullable=False)
 
@@ -40,5 +41,5 @@ class Unknown(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     image_data = Column(LargeBinary, nullable=False)
-    embeddings = Column(LargeBinary, nullable=False)
+    embeddings = Column(Vector(512), nullable=False)
     detected_at = Column(DateTime, nullable=False, index=True)

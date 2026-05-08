@@ -31,6 +31,14 @@ class FaceRecognizer:
         if use_gpu:
             try:
                 import onnxruntime as ort
+                if hasattr(ort, "preload_dlls"):
+                    try:
+                        ort.preload_dlls()
+                    except TypeError:
+                        ort.preload_dlls()
+                    except Exception as preload_error:
+                        print(f"Warning: ONNX Runtime DLL preload failed: {preload_error}")
+
                 available_providers = ort.get_available_providers()
                 
                 if 'CUDAExecutionProvider' in available_providers:
