@@ -6,6 +6,9 @@
 // Configuration
 const API_BASE = 'http://localhost:8000';
 const MIN_RECOGNITION_INTERVAL = 500;
+const OVERLAY_HOLD_MS = 1200;
+const OVERLAY_FADE_MS = 400;
+const OVERLAY_PREDICTION_MAX_MS = 400;
 let recognitionInterval = 1000;
 let similarityThreshold = 0.6;
 
@@ -20,6 +23,8 @@ let capturedImageData = null;
 let currentUnknownId = null;
 let currentCameraSource = 'browser'; // browser, rtsp, http
 let activeCameraId = null;
+let overlayTracks = new Map();
+let overlayAnimationStarted = false;
 let stats = {
     detected: 0,
     recognized: 0,
@@ -72,6 +77,7 @@ const elements = {
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
+    startOverlayRenderer();
     loadPeople();
     loadAttendance();
     loadUnknownFaces();
@@ -551,8 +557,7 @@ function startRemoteCameraRecognition() {
             const captureCtx = elements.capture.getContext('2d');
             captureCtx.drawImage(imageBitmap, 0, 0, elements.capture.width, elements.capture.height);
             
-            // Draw recognition overlays
-            drawRecognitionOverlay(recognitionData);
+            updateOverlayTracks(recognitionData);
             
             frameCount++;
             errorCount = 0;
@@ -594,58 +599,115 @@ function startRemoteCameraRecognition() {
     }, fetchInterval);
 }
 
-// NEW: Draw recognition results efficiently
-function drawRecognitionOverlay(data) {
-    const overlayCtx = elements.overlay.getContext('2d');
-    overlayCtx.clearRect(0, 0, elements.overlay.width, elements.overlay.height);
-    
-    if (!data.faces || data.faces.length === 0) {
-        return;
-    }
-    
-    data.faces.forEach(face => {
-        const [x, y, w, h] = face.bbox;
-        
-        // Draw bounding box with glow effect
-        const boxColor = face.known ? '#00ff00' : '#ff0000';
-        overlayCtx.strokeStyle = boxColor;
-        overlayCtx.lineWidth = 3;
-        overlayCtx.shadowBlur = 10;
-        overlayCtx.shadowColor = boxColor;
-        overlayCtx.strokeRect(x, y, w, h);
-        overlayCtx.shadowBlur = 0;
-        
-        // Draw label with better styling
-        const trackLabel = face.track_id ? `ID:${face.track_id} ` : '';
-        const nameLabel = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
-            `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
-        const label = `${trackLabel}${nameLabel}`;
-        
-        overlayCtx.font = 'bold 16px Arial';
-        const metrics = overlayCtx.measureText(label);
-        const textWidth = metrics.width;
-        const padding = 10;
-        const labelHeight = 28;
-        
-        // Semi-transparent background
-        overlayCtx.fillStyle = face.known ? 'rgba(0, 255, 0, 0.8)' : 'rgba(255, 0, 0, 0.8)';
-        overlayCtx.fillRect(x, y - labelHeight - 5, textWidth + padding * 2, labelHeight);
-        
-        // Text
-        overlayCtx.fillStyle = '#000';
-        overlayCtx.fillText(label, x + padding, y - 10);
-        
-        // Update stats
-        stats.detected++;
-        if (face.known) stats.recognized++;
-        else stats.unknown++;
+function startOverlayRenderer() {
+    if (overlayAnimationStarted) return;
+    overlayAnimationStarted = true;
+    requestAnimationFrame(renderOverlayFrame);
+}
+
+function updateOverlayTracks(data) {
+    const now = performance.now();
+    const faces = data.faces || [];
+    const activeKeys = new Set();
+
+    faces.forEach((face, index) => {
+        const key = face.track_id ? `track:${face.track_id}` : `face:${index}`;
+        activeKeys.add(key);
+        const previous = overlayTracks.get(key);
+        const bbox = scaleFaceBbox(face.bbox);
+        const velocity = previous
+            ? bbox.map((value, i) => (value - previous.bbox[i]) / Math.max(now - previous.updatedAt, 1))
+            : [0, 0, 0, 0];
+
+        overlayTracks.set(key, {
+            face,
+            bbox,
+            previousBbox: previous ? previous.bbox : bbox,
+            velocity,
+            updatedAt: now
+        });
     });
-    
-    updateStats();
-    
-    // Update lists if needed
-    if (data.faces.some(f => f.known)) loadAttendance();
-    if (data.faces.some(f => f.unk_id)) loadUnknownFaces();
+
+    if (faces.length > 0) {
+        for (const key of overlayTracks.keys()) {
+            const track = overlayTracks.get(key);
+            if (!activeKeys.has(key) && now - track.updatedAt > OVERLAY_HOLD_MS) {
+                overlayTracks.delete(key);
+            }
+        }
+    }
+
+    if (data.faces?.some(f => f.known)) loadAttendance();
+    if (data.faces?.some(f => f.unk_id)) loadUnknownFaces();
+}
+
+function scaleFaceBbox(bbox) {
+    const [x, y, w, h] = bbox;
+    const scaleX = currentCameraSource === 'browser' && elements.video.videoWidth
+        ? elements.overlay.width / elements.video.videoWidth
+        : 1;
+    const scaleY = currentCameraSource === 'browser' && elements.video.videoHeight
+        ? elements.overlay.height / elements.video.videoHeight
+        : 1;
+
+    return [x * scaleX, y * scaleY, w * scaleX, h * scaleY];
+}
+
+function renderOverlayFrame() {
+    const ctx = elements.overlay.getContext('2d');
+    const now = performance.now();
+    ctx.clearRect(0, 0, elements.overlay.width, elements.overlay.height);
+
+    for (const [key, track] of overlayTracks.entries()) {
+        const age = now - track.updatedAt;
+        if (age > OVERLAY_HOLD_MS) {
+            overlayTracks.delete(key);
+            continue;
+        }
+
+        const opacity = age > OVERLAY_HOLD_MS - OVERLAY_FADE_MS
+            ? Math.max(0, 1 - ((age - (OVERLAY_HOLD_MS - OVERLAY_FADE_MS)) / OVERLAY_FADE_MS))
+            : 1;
+        const predictedMs = Math.min(age, OVERLAY_PREDICTION_MAX_MS);
+        const bbox = track.bbox.map((value, i) => value + track.velocity[i] * predictedMs);
+        drawFaceOverlay(ctx, track.face, bbox, opacity);
+    }
+
+    requestAnimationFrame(renderOverlayFrame);
+}
+
+function drawFaceOverlay(ctx, face, bbox, opacity = 1) {
+    const [x, y, w, h] = bbox;
+    const boxColor = face.known ? '#00ff00' : '#ff0000';
+    const fillColor = face.known
+        ? `rgba(0, 255, 0, ${0.8 * opacity})`
+        : `rgba(255, 0, 0, ${0.8 * opacity})`;
+
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.strokeStyle = boxColor;
+    ctx.lineWidth = 3;
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = boxColor;
+    ctx.strokeRect(x, y, w, h);
+    ctx.shadowBlur = 0;
+
+    const trackLabel = face.track_id ? `ID:${face.track_id} ` : '';
+    const nameLabel = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` :
+        `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
+    const label = `${trackLabel}${nameLabel}`;
+
+    ctx.font = 'bold 16px Arial';
+    const padding = 10;
+    const labelHeight = 28;
+    const textWidth = ctx.measureText(label).width;
+    const labelY = Math.max(labelHeight + 5, y);
+
+    ctx.fillStyle = fillColor;
+    ctx.fillRect(x, labelY - labelHeight - 5, textWidth + padding * 2, labelHeight);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + padding, labelY - 10);
+    ctx.restore();
 }
 
 // Update startRemoteCameraFrameFetch for display-only mode (no recognition)
@@ -734,55 +796,20 @@ async function captureAndRecognize() {
 }
 
 function handleRecognitionResult(data) {
-    clearOverlay();
-    
+    updateOverlayTracks(data);
     if (!data.faces || data.faces.length === 0) return;
-    
-    const ctx = elements.overlay.getContext('2d');
-    const scaleX = currentCameraSource === 'browser' && elements.video.videoWidth ?
-        elements.overlay.width / elements.video.videoWidth : 1;
-    const scaleY = currentCameraSource === 'browser' && elements.video.videoHeight ?
-        elements.overlay.height / elements.video.videoHeight : 1;
-    
+
     data.faces.forEach(face => {
-        const [x, y, w, h] = face.bbox;
-        const sx = x * scaleX;
-        const sy = y * scaleY;
-        const sw = w * scaleX;
-        const sh = h * scaleY;
-        
-        // Draw bounding box
-        const boxColor = face.known ? '#00ff00' : '#ff0000';
-        ctx.strokeStyle = boxColor;
-        ctx.lineWidth = 3;
-        ctx.strokeRect(sx, sy, sw, sh);
-        
-        // Draw label
-        const trackLabel = face.track_id ? `ID:${face.track_id} ` : '';
-        const nameLabel = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
-            `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
-        const label = `${trackLabel}${nameLabel}`;
-        ctx.font = 'bold 18px Arial';
-        const textWidth = ctx.measureText(label).width;
-        
-        ctx.fillStyle = boxColor;
-        ctx.fillRect(sx, sy - 30, textWidth + 20, 30);
-        
-        ctx.fillStyle = '#000';
-        ctx.fillText(label, sx + 10, sy - 8);
-        
         stats.detected++;
         if (face.known) stats.recognized++;
         else stats.unknown++;
     });
-    
+
     updateStats();
-    
-    if (data.faces.some(f => f.known)) loadAttendance();
-    if (data.faces.some(f => f.unk_id)) loadUnknownFaces();
 }
 
 function clearOverlay() {
+    overlayTracks.clear();
     const ctx = elements.overlay.getContext('2d');
     ctx.clearRect(0, 0, elements.overlay.width, elements.overlay.height);
 }
