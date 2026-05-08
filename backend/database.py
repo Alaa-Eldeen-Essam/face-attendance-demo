@@ -12,7 +12,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg2://attendance:attendance@localhost:5432/attendance_demo",
+    "postgresql+psycopg2://attendance:attendance@localhost:5433/attendance_demo",
 )
 
 engine_kwargs = {"pool_pre_ping": True}

@@ -844,14 +844,6 @@ async def process_camera_frame(camera_id: str):
         
         db = SessionLocal()
         try:
-            known_people = db.query(Person).filter(Person.deleted == False).all()
-            
-            # Pre-load embeddings for faster comparison
-            known_embeddings = []
-            for person in known_people:
-                emb = np.frombuffer(person.embeddings, dtype=np.float32)
-                known_embeddings.append((person, emb))
-            
             results = []
             for face in faces:
                 bbox = face['bbox']
@@ -866,15 +858,7 @@ async def process_camera_frame(camera_id: str):
                         int(bbox[3] / scale_factor)
                     ]
                 
-                best_match = None
-                best_score = -1
-                
-                # Faster comparison with pre-loaded embeddings
-                for person, stored_embedding in known_embeddings:
-                    score = recognizer.compare_embeddings(embedding, stored_embedding)
-                    if score > best_score:
-                        best_score = score
-                        best_match = person
+                best_match, best_score = find_best_person_match(db, embedding)
                 
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
                     record_attendance(db, best_match.id, best_match.name, best_match.identifier)
