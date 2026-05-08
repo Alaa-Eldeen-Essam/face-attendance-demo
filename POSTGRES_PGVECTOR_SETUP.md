@@ -7,11 +7,37 @@ This demo uses PostgreSQL with pgvector for face embeddings.
 From `face-attendance-demo`:
 
 ```powershell
-docker compose up -d db
+docker compose up -d
 ```
 
 The database is exposed on host port `5433` to avoid conflicting with other
 local PostgreSQL services.
+
+## Open pgAdmin
+
+Open:
+
+```text
+http://localhost:5050
+```
+
+Login:
+
+```text
+Email: admin@example.com
+Password: admin
+```
+
+Register the database server in pgAdmin:
+
+```text
+Name: face-attendance-demo
+Host name/address: db
+Port: 5432
+Maintenance database: attendance_demo
+Username: attendance
+Password: attendance
+```
 
 ## Install Python dependencies
 
