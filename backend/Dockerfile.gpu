@@ -1,0 +1,62 @@
+# GPU variant for Python 3.11.
+# CUDA/cuDNN user-space libraries are installed by onnxruntime-gpu[cuda,cudnn].
+# The host NVIDIA driver is provided through Docker's NVIDIA runtime.
+
+FROM python:3.11-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy GPU-specific requirements
+COPY requirements-gpu-cu12.txt .
+
+# Install GPU-accelerated packages
+RUN pip install --no-cache-dir -r requirements-gpu-cu12.txt
+
+# ========== Runtime Stage ==========
+FROM python:3.11-slim-bookworm
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libglib2.0-0 \
+    libgomp1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy pre-built virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Set environment variables
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CUDA_VISIBLE_DEVICES=0 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Copy application code
+COPY . .
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose API port
+EXPOSE 8000
+
+# Run FastAPI application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

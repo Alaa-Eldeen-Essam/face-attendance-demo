@@ -1,0 +1,75 @@
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist/
+build/
+
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+attendance_demo.db
+
+# Logs
+*.log
+logs/
+request_performance.log
+
+# Models and data
+models/
+data/
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# OS files
+.DS_Store
+Thumbs.db
+.AppleDouble
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Frontend build artifacts
+node_modules/
+dist/
+build/

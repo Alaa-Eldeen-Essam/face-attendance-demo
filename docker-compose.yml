@@ -1,7 +1,7 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    container_name: face_attendance_demo_db
+    container_name: face_attendance_db
     environment:
       POSTGRES_USER: attendance
       POSTGRES_PASSWORD: attendance
@@ -10,15 +10,55 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U attendance -d attendance_demo"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    networks:
+      - face_attendance_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: face_attendance_backend
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://attendance:attendance@db:5432/attendance_demo
+      LOG_LEVEL: INFO
+      SIMILARITY_THRESHOLD: "0.45"
+      FACE_QUALITY_THRESHOLD: "0.5"
+      UNKNOWN_SIMILARITY_THRESHOLD: "0.5"
+      ATTENDANCE_WINDOW_MINUTES: "30"
+      TRACKER_MAX_AGE: "10"
+      TRACKER_MIN_HITS: "1"
+      TRACKER_IOU_THRESHOLD: "0.3"
+      TRACK_IDENTITY_HISTORY: "5"
+      TRACK_IDENTITY_CONFIRM_FRAMES: "3"
+      UNKNOWN_CONFIRM_FRAMES: "5"
+      IDENTITY_LOCK_MIN_SCORE: "0.50"
+    volumes:
+      - ./backend:/app
+      - insightface_models:/root/.insightface
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - face_attendance_network
 
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: face_attendance_demo_pgadmin
+    container_name: face_attendance_pgadmin
     depends_on:
       db:
         condition: service_healthy
@@ -31,7 +71,14 @@ services:
       - "5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - face_attendance_network
 
 volumes:
   postgres_data:
+  insightface_models:
   pgadmin_data:
+
+networks:
+  face_attendance_network:
+    driver: bridge

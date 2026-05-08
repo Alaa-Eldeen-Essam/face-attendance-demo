@@ -1,0 +1,111 @@
+# Production configuration with GPU support and PostgreSQL
+# Usage: docker-compose -f docker-compose.prod.yml up -d
+# Requires: nvidia-docker runtime installed
+
+services:
+  # PostgreSQL Database with pgVector support
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: face_attendance_db
+    environment:
+      POSTGRES_USER: ${DB_USER:-attendance}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-attendance}
+      POSTGRES_DB: ${DB_NAME:-attendance_demo}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Optional: Initialize database with schema
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-attendance}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - face_attendance_network
+
+  # GPU-accelerated FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.gpu
+    container_name: face_attendance_backend
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://${DB_USER:-attendance}:${DB_PASSWORD:-attendance}@db:5432/${DB_NAME:-attendance_demo}
+      - LOG_LEVEL=INFO
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.45}
+      - ATTENDANCE_WINDOW_MINUTES=30
+      - FACE_QUALITY_THRESHOLD=${FACE_QUALITY_THRESHOLD:-0.5}
+      - UNKNOWN_SIMILARITY_THRESHOLD=${UNKNOWN_SIMILARITY_THRESHOLD:-0.5}
+      - TRACKER_MAX_AGE=${TRACKER_MAX_AGE:-10}
+      - TRACKER_MIN_HITS=${TRACKER_MIN_HITS:-1}
+      - TRACKER_IOU_THRESHOLD=${TRACKER_IOU_THRESHOLD:-0.3}
+      - TRACK_IDENTITY_HISTORY=${TRACK_IDENTITY_HISTORY:-5}
+      - TRACK_IDENTITY_CONFIRM_FRAMES=${TRACK_IDENTITY_CONFIRM_FRAMES:-3}
+      - UNKNOWN_CONFIRM_FRAMES=${UNKNOWN_CONFIRM_FRAMES:-5}
+      - IDENTITY_LOCK_MIN_SCORE=${IDENTITY_LOCK_MIN_SCORE:-0.50}
+      # GPU Configuration
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      # Persist model cache to avoid re-downloading on restart
+      - insightface_models:/root/.insightface
+      # Persist application data
+      - backend_data:/app/data
+      # Optional: mount source code for debugging
+      # - ./backend:/app
+    # GPU device configuration
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # Number of GPUs to use
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - face_attendance_network
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: face_attendance_pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    restart: unless-stopped
+    networks:
+      - face_attendance_network
+
+volumes:
+  postgres_data:
+  insightface_models:
+  backend_data:
+  pgadmin_data:
+
+networks:
+  face_attendance_network:
+    driver: bridge
