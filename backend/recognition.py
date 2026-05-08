@@ -3,6 +3,10 @@ Face recognition using InsightFace.
 Wrapper for easy model swapping and configuration.
 Supports GPU with CPU fallback.
 """
+from cuda_dlls import prepare_cuda_dll_paths
+
+prepare_cuda_dll_paths()
+
 import numpy as np
 import cv2
 from typing import List, Dict, Optional
@@ -43,15 +47,15 @@ class FaceRecognizer:
                 
                 if 'CUDAExecutionProvider' in available_providers:
                     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-                    print("✓ GPU (CUDA) available, using GPU acceleration")
+                    print("GPU (CUDA) available, using GPU acceleration")
                 elif 'CoreMLExecutionProvider' in available_providers:
                     providers = ['CoreMLExecutionProvider', 'CPUExecutionProvider']
-                    print("✓ CoreML available, using Apple GPU acceleration")
+                    print("CoreML available, using Apple GPU acceleration")
                 else:
                     providers = ['CPUExecutionProvider']
-                    print("⚠ GPU not available, using CPU")
+                    print("GPU not available, using CPU")
             except Exception as e:
-                print(f"⚠ Error checking GPU: {e}, falling back to CPU")
+                print(f"Error checking GPU: {e}, falling back to CPU")
                 providers = ['CPUExecutionProvider']
         else:
             providers = ['CPUExecutionProvider']
@@ -64,7 +68,7 @@ class FaceRecognizer:
         self.app.prepare(ctx_id=0, det_size=det_size)
         
         self.providers = providers
-        print(f"✓ Model {model_name} loaded successfully with providers: {providers}")
+        print(f"Model {model_name} loaded successfully with providers: {providers}")
     
     def detect_faces(self, image: np.ndarray, min_face_size: int = 30) -> List[Dict]:
         """

@@ -2,6 +2,7 @@ import os
 import io
 import base64
 import hashlib
+import logging
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
@@ -11,11 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy import func
 import numpy as np
 from PIL import Image
 import cv2
 
-from database import SessionLocal, init_db, Person, Attendance, Unknown
+from database import SessionLocal, init_db, Person, PersonEmbedding, Attendance, Unknown
 from recognition import FaceRecognizer
 from camera_manager import CameraManager, CameraType, camera_manager
 
@@ -27,6 +29,11 @@ UNKNOWN_SIMILARITY_THRESHOLD = float(os.getenv("UNKNOWN_SIMILARITY_THRESHOLD", "
 
 # Global recognizer instance
 recognizer: Optional[FaceRecognizer] = None
+logger = logging.getLogger("face_attendance_demo")
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 # Request/Response Models
 class AddPersonRequest(BaseModel):
@@ -49,23 +56,21 @@ async def lifespan(app: FastAPI):
     
     # Initialize database
     init_db()
-    print("✓ Database initialized")
+    logger.info("Database initialized")
     
     # Initialize face recognizer with GPU support
     try:
         recognizer = FaceRecognizer(model_name="buffalo_l", use_gpu=True)
-        print("✓ InsightFace model loaded (GPU)")
+        logger.info("InsightFace model loaded with GPU preference")
     except Exception as e:
-        print(f"⚠ GPU initialization failed: {e}")
-        print("Falling back to CPU...")
+        logger.warning("GPU initialization failed; falling back to CPU: %s", e)
         recognizer = FaceRecognizer(model_name="buffalo_l", use_gpu=False)
-        print("✓ InsightFace model loaded (CPU)")
-    
+        logger.info("InsightFace model loaded on CPU")
     yield
     
     # Cleanup
     camera_manager.close_all()
-    print("Shutting down...")
+    logger.info("Shutting down")
 
 app = FastAPI(
     title="Face Attendance Demo - Enhanced",
@@ -111,12 +116,14 @@ def embedding_to_vector(embedding: np.ndarray) -> List[float]:
     return np.asarray(embedding, dtype=np.float32).tolist()
 
 def find_best_person_match(db, embedding: np.ndarray):
-    """Find the nearest active person embedding using pgvector cosine distance."""
+    """Find the nearest active person sample embedding using pgvector cosine distance."""
     query_vector = embedding_to_vector(embedding)
-    distance = Person.embeddings.cosine_distance(query_vector)
+    distance = PersonEmbedding.embedding.cosine_distance(query_vector)
     row = (
-        db.query(Person, distance.label("distance"))
+        db.query(Person, PersonEmbedding, distance.label("distance"))
+        .join(PersonEmbedding, PersonEmbedding.person_id == Person.id)
         .filter(Person.deleted == False)
+        .filter(PersonEmbedding.active == True)
         .order_by(distance)
         .first()
     )
@@ -124,9 +131,52 @@ def find_best_person_match(db, embedding: np.ndarray):
     if not row:
         return None, 0.0
     
-    person, distance_value = row
+    person, sample, distance_value = row
     similarity = 1.0 - float(distance_value)
+    logger.info(
+        "Nearest match person_id=%s sample_id=%s name=%s similarity=%.4f threshold=%.4f",
+        person.id,
+        sample.id,
+        person.name,
+        similarity,
+        SIMILARITY_THRESHOLD,
+    )
     return person, similarity
+
+def create_person_embedding(
+    db,
+    person: Person,
+    image_bytes: bytes,
+    embedding: np.ndarray,
+    source: str,
+    quality_score: Optional[float] = None,
+) -> PersonEmbedding:
+    sample = PersonEmbedding(
+        person_id=person.id,
+        image_data=image_bytes,
+        embedding=embedding_to_vector(embedding),
+        source=source,
+        quality_score=quality_score,
+        created_at=datetime.utcnow(),
+        active=True,
+    )
+    db.add(sample)
+    return sample
+
+def build_unknown_response(db, bbox: List[int], best_match, best_score: float, unk_id: Optional[int] = None) -> Dict:
+    response = {
+        "known": False,
+        "bbox": [int(x) for x in bbox],
+        "score": float(best_score) if best_match else 0.0,
+        "best_match_score": float(best_score) if best_match else 0.0,
+    }
+    if best_match:
+        response["best_match_name"] = best_match.name
+        response["best_match_identifier"] = best_match.identifier
+        response["threshold"] = SIMILARITY_THRESHOLD
+    if unk_id is not None:
+        response["unk_id"] = unk_id
+    return response
 
 def find_similar_unknown(db, embedding: np.ndarray, threshold: float, detected_after: Optional[datetime] = None):
     """Find a similar unknown face using pgvector cosine distance."""
@@ -191,18 +241,27 @@ async def add_person(
             name=name,
             identifier=identifier,
             image_data=image_bytes,
-            embeddings=embedding_to_vector(embedding),
             created_at=datetime.utcnow(),
             deleted=False
         )
         
         db.add(person)
+        db.flush()
+        sample = create_person_embedding(
+            db,
+            person,
+            image_bytes,
+            embedding,
+            source="upload",
+            quality_score=float(face.get("det_score", 0.0)),
+        )
         db.commit()
         db.refresh(person)
         
         return {
             "message": "Person added successfully",
             "person_id": person.id,
+            "embedding_id": sample.id,
             "name": person.name,
             "identifier": person.identifier
         }
@@ -256,18 +315,27 @@ async def capture_person(
             name=name,
             identifier=identifier,
             image_data=image_bytes,
-            embeddings=embedding_to_vector(embedding),
             created_at=datetime.utcnow(),
             deleted=False
         )
         
         db.add(person)
+        db.flush()
+        sample = create_person_embedding(
+            db,
+            person,
+            image_bytes,
+            embedding,
+            source="camera",
+            quality_score=float(face.get("det_score", 0.0)),
+        )
         db.commit()
         db.refresh(person)
         
         return {
             "message": "Person captured and added successfully",
             "person_id": person.id,
+            "embedding_id": sample.id,
             "name": person.name,
             "identifier": person.identifier
         }
@@ -277,6 +345,78 @@ async def capture_person(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to capture person: {str(e)}")
+    finally:
+        db.close()
+
+@app.post("/people/{person_id}/embeddings")
+async def add_person_embedding(
+    person_id: int,
+    file: Optional[UploadFile] = File(None),
+    image_base64: Optional[str] = Form(None),
+    source: str = Form("camera")
+):
+    """Add another face photo/embedding sample for an existing person."""
+    if not recognizer:
+        raise HTTPException(status_code=503, detail="Recognizer not initialized")
+
+    if file is None and not image_base64:
+        raise HTTPException(status_code=400, detail="Provide file or image_base64")
+
+    db = SessionLocal()
+    try:
+        person = db.query(Person).filter(Person.id == person_id, Person.deleted == False).first()
+        if not person:
+            raise HTTPException(status_code=404, detail="Person not found")
+
+        if file is not None:
+            image_data = await file.read()
+        else:
+            image_data = base64.b64decode(image_base64.split(',')[1] if ',' in image_base64 else image_base64)
+
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail="Invalid image format")
+
+        faces = recognizer.detect_faces(img)
+        if not faces:
+            raise HTTPException(status_code=400, detail="No face detected in image")
+        if len(faces) > 1:
+            raise HTTPException(status_code=400, detail="Multiple faces detected. Use a single-face image.")
+
+        face = faces[0]
+        embedding = face["embedding"]
+        _, buffer = cv2.imencode('.jpg', img)
+        image_bytes = buffer.tobytes()
+
+        sample = create_person_embedding(
+            db,
+            person,
+            image_bytes,
+            embedding,
+            source=source,
+            quality_score=float(face.get("det_score", 0.0)),
+        )
+
+        if not person.image_data:
+            person.image_data = image_bytes
+
+        db.commit()
+        db.refresh(sample)
+        logger.info("Added embedding sample_id=%s person_id=%s source=%s", sample.id, person.id, source)
+        return {
+            "message": "Photo added successfully",
+            "person_id": person.id,
+            "embedding_id": sample.id,
+            "name": person.name,
+            "identifier": person.identifier,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception("Failed to add embedding for person_id=%s", person_id)
+        raise HTTPException(status_code=500, detail=f"Failed to add photo: {str(e)}")
     finally:
         db.close()
 
@@ -305,7 +445,7 @@ async def compare_image(file: UploadFile = File(...)):
             for face in faces:
                 bbox = face['bbox']
                 embedding = face['embedding']
-                
+
                 best_match, best_score = find_best_person_match(db, embedding)
                 
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
@@ -318,11 +458,7 @@ async def compare_image(file: UploadFile = File(...)):
                         "score": float(best_score)
                     })
                 else:
-                    results.append({
-                        "known": False,
-                        "bbox": [int(x) for x in bbox],
-                        "score": float(best_score) if best_match else 0.0
-                    })
+                    results.append(build_unknown_response(db, bbox, best_match, best_score))
             
             return {"faces": results}
             
@@ -366,11 +502,12 @@ async def seed_demo():
                 name=person_data["name"],
                 identifier=person_data["identifier"],
                 image_data=image_bytes,
-                embeddings=embedding_to_vector(embedding),
                 created_at=datetime.utcnow(),
                 deleted=False
             )
             db.add(person)
+            db.flush()
+            create_person_embedding(db, person, image_bytes, embedding, source="seed")
             created.append(person_data["name"])
         
         db.commit()
@@ -412,7 +549,7 @@ async def process_frame(file: UploadFile = File(...)):
             for face in faces:
                 bbox = face['bbox']
                 embedding = face['embedding']
-                
+
                 best_match, best_score = find_best_person_match(db, embedding)
                 
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
@@ -428,13 +565,7 @@ async def process_frame(file: UploadFile = File(...)):
                     })
                 else:
                     unk_id = save_unknown_face(db, img, bbox, embedding)
-                    
-                    results.append({
-                        "known": False,
-                        "bbox": [int(x) for x in bbox],
-                        "score": float(best_score) if best_match else 0.0,
-                        "unk_id": unk_id
-                    })
+                    results.append(build_unknown_response(db, bbox, best_match, best_score, unk_id))
             
             db.commit()
             return {"faces": results}
@@ -511,12 +642,12 @@ def save_unknown_face(db, img, bbox, embedding) -> Optional[int]:
         detected_after=five_minutes_ago,
     )
     if recent_unknown:
-        print(f"Duplicate unknown face detected (similarity: {similarity:.3f}), using existing ID: {recent_unknown.id}")
+        logger.info("Duplicate recent unknown similarity=%.3f unknown_id=%s", similarity, recent_unknown.id)
         return recent_unknown.id
     
     old_unknown, similarity = find_similar_unknown(db, embedding, 0.90)
     if old_unknown:
-        print(f"Very similar to existing unknown (similarity: {similarity:.3f}), using existing ID: {old_unknown.id}")
+        logger.info("Duplicate old unknown similarity=%.3f unknown_id=%s", similarity, old_unknown.id)
         return old_unknown.id
     
     # No similar unknown found, create new entry
@@ -528,7 +659,7 @@ def save_unknown_face(db, img, bbox, embedding) -> Optional[int]:
     db.add(unknown)
     db.flush()
     
-    print(f"New unknown face saved with ID: {unknown.id}")
+    logger.info("New unknown face saved unknown_id=%s", unknown.id)
     return unknown.id
 
 # Unknown Face Management
@@ -567,7 +698,13 @@ async def migrate_unknown(request: MigrateUnknownRequest):
             person = db.query(Person).filter(Person.id == request.person_id).first()
             if not person:
                 raise HTTPException(status_code=404, detail="Person not found")
-            
+            create_person_embedding(
+                db,
+                person,
+                unknown.image_data,
+                np.asarray(unknown.embeddings, dtype=np.float32),
+                source="unknown_migration",
+            )
             message = f"Unknown face associated with existing person: {person.name}"
             
         elif request.name and request.identifier:
@@ -579,12 +716,18 @@ async def migrate_unknown(request: MigrateUnknownRequest):
                 name=request.name,
                 identifier=request.identifier,
                 image_data=unknown.image_data,
-                embeddings=unknown.embeddings,
                 created_at=datetime.utcnow(),
                 deleted=False
             )
             db.add(person)
             db.flush()
+            create_person_embedding(
+                db,
+                person,
+                unknown.image_data,
+                np.asarray(unknown.embeddings, dtype=np.float32),
+                source="unknown_migration",
+            )
             
             message = f"Unknown face migrated to new person: {request.name}"
         else:
@@ -631,18 +774,28 @@ async def list_people():
     """List all known people with their images."""
     db = SessionLocal()
     try:
-        people = db.query(Person).filter(Person.deleted == False).all()
+        people = (
+            db.query(Person, func.count(PersonEmbedding.id).label("embedding_count"))
+            .outerjoin(
+                PersonEmbedding,
+                (PersonEmbedding.person_id == Person.id) & (PersonEmbedding.active == True)
+            )
+            .filter(Person.deleted == False)
+            .group_by(Person.id)
+            .all()
+        )
         
         result = []
-        for person in people:
-            img_b64 = base64.b64encode(person.image_data).decode('utf-8')
+        for person, embedding_count in people:
+            img_b64 = base64.b64encode(person.image_data or b"").decode('utf-8')
             
             result.append({
                 "id": person.id,
                 "name": person.name,
                 "identifier": person.identifier,
-                "image": f"data:image/jpeg;base64,{img_b64}",
-                "created_at": person.created_at.isoformat()
+                "image": f"data:image/jpeg;base64,{img_b64}" if img_b64 else "",
+                "created_at": person.created_at.isoformat(),
+                "embedding_count": int(embedding_count or 0)
             })
         
         return {"people": result}
@@ -681,6 +834,7 @@ async def clear_data():
     db = SessionLocal()
     try:
         db.query(Attendance).delete()
+        db.query(PersonEmbedding).delete()
         db.query(Person).delete()
         db.query(Unknown).delete()
         db.commit()
@@ -857,7 +1011,7 @@ async def process_camera_frame(camera_id: str):
                         int(bbox[2] / scale_factor),
                         int(bbox[3] / scale_factor)
                     ]
-                
+
                 best_match, best_score = find_best_person_match(db, embedding)
                 
                 if best_match and best_score >= SIMILARITY_THRESHOLD:
@@ -873,13 +1027,7 @@ async def process_camera_frame(camera_id: str):
                     })
                 else:
                     unk_id = save_unknown_face(db, frame, bbox, embedding)
-                    
-                    results.append({
-                        "known": False,
-                        "bbox": bbox,
-                        "score": float(best_score) if best_match else 0.0,
-                        "unk_id": unk_id
-                    })
+                    results.append(build_unknown_response(db, bbox, best_match, best_score, unk_id))
             
             db.commit()
             return {

@@ -23,6 +23,14 @@ let stats = {
     unknown: 0
 };
 
+function getErrorMessage(errorBody, fallback = 'Request failed') {
+    const detail = errorBody && errorBody.detail;
+    if (!detail) return fallback;
+    if (typeof detail === 'string') return detail;
+    if (detail.message) return detail.message;
+    return JSON.stringify(detail);
+}
+
 // DOM Elements
 const elements = {
     video: document.getElementById('video'),
@@ -583,17 +591,17 @@ function drawRecognitionOverlay(data) {
         const [x, y, w, h] = face.bbox;
         
         // Draw bounding box with glow effect
-        overlayCtx.strokeStyle = face.known ? '#00ff00' : '#ff0000';
+        const boxColor = face.known ? '#00ff00' : '#ff0000';
+        overlayCtx.strokeStyle = boxColor;
         overlayCtx.lineWidth = 3;
         overlayCtx.shadowBlur = 10;
-        overlayCtx.shadowColor = face.known ? '#00ff00' : '#ff0000';
+        overlayCtx.shadowColor = boxColor;
         overlayCtx.strokeRect(x, y, w, h);
         overlayCtx.shadowBlur = 0;
         
         // Draw label with better styling
-        const label = face.known ? 
-            `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
-            'Unknown';
+        const label = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
+            `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
         
         overlayCtx.font = 'bold 16px Arial';
         const metrics = overlayCtx.measureText(label);
@@ -719,16 +727,18 @@ function handleRecognitionResult(data) {
         const sh = h * scaleY;
         
         // Draw bounding box
-        ctx.strokeStyle = face.known ? '#00ff00' : '#ff0000';
+        const boxColor = face.known ? '#00ff00' : '#ff0000';
+        ctx.strokeStyle = boxColor;
         ctx.lineWidth = 3;
         ctx.strokeRect(sx, sy, sw, sh);
         
         // Draw label
-        const label = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 'Unknown';
+        const label = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
+            `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
         ctx.font = 'bold 18px Arial';
         const textWidth = ctx.measureText(label).width;
         
-        ctx.fillStyle = face.known ? '#00ff00' : '#ff0000';
+        ctx.fillStyle = boxColor;
         ctx.fillRect(sx, sy - 30, textWidth + 20, 30);
         
         ctx.fillStyle = '#000';
@@ -799,7 +809,7 @@ async function handleImageUpload(e) {
         
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail);
+            throw new Error(getErrorMessage(error, 'Failed to add person'));
         }
         
         const data = await response.json();
@@ -816,6 +826,77 @@ async function handleImageUpload(e) {
         elements.uploadImageBtn.textContent = '📁 Upload Photo';
     }
 }
+
+window.addPhotoToPerson = function(personId) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('source', 'additional_upload');
+
+            const response = await fetch(`${API_BASE}/people/${personId}/embeddings`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(getErrorMessage(error, 'Failed to add photo'));
+            }
+
+            const data = await response.json();
+            showNotification(data.message, 'success');
+            loadPeople();
+        } catch (err) {
+            showNotification(`Failed to add photo: ${err.message}`, 'error');
+        }
+    };
+    input.click();
+};
+
+window.capturePhotoForExistingPerson = async function(personId) {
+    if (!elements.video.videoWidth || !elements.video.videoHeight) {
+        showNotification('Please start camera first', 'warning');
+        return;
+    }
+
+    const ctx = elements.capture.getContext('2d');
+    ctx.drawImage(elements.video, 0, 0, elements.capture.width, elements.capture.height);
+
+    elements.capture.toBlob((blob) => {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            try {
+                const formData = new FormData();
+                formData.append('image_base64', e.target.result);
+                formData.append('source', 'additional_camera');
+
+                const response = await fetch(`${API_BASE}/people/${personId}/embeddings`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(getErrorMessage(error, 'Failed to add camera photo'));
+                }
+
+                const data = await response.json();
+                showNotification(data.message, 'success');
+                loadPeople();
+            } catch (err) {
+                showNotification(`Failed to add camera photo: ${err.message}`, 'error');
+            }
+        };
+        reader.readAsDataURL(blob);
+    }, 'image/jpeg');
+};
 
 function capturePhotoForPerson() {
     if (!elements.video.videoWidth || !elements.video.videoHeight) {
@@ -887,7 +968,7 @@ async function confirmPersonCapture() {
         
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail);
+            throw new Error(getErrorMessage(error, 'Failed to capture person'));
         }
         
         const data = await response.json();
@@ -944,7 +1025,7 @@ function displayCompareResult(data) {
         `<div class="compare-results">${data.faces.map((face, i) => `
             <div class="compare-item ${face.known ? 'match' : 'no-match'}">
                 <strong>Face ${i + 1}:</strong> ${face.known ? 
-                    `${face.name} (${face.identifier})` : 'Unknown'}<br>
+                    `${face.name} (${face.identifier})` : `Unknown${face.best_match_name ? `, closest: ${face.best_match_name}` : ''}`}<br>
                 <span class="score">Confidence: ${(face.score * 100).toFixed(1)}%</span>
             </div>
         `).join('')}</div>`;
@@ -1036,7 +1117,7 @@ async function confirmMigrate() {
         
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail);
+            throw new Error(getErrorMessage(error, 'Migration failed'));
         }
         
         const data = await response.json();
@@ -1123,10 +1204,15 @@ async function loadPeople() {
             '<p class="empty-state">No people registered.</p>' :
             data.people.map(person => `
                 <div class="person-card">
-                    <img src="${person.image}" alt="${person.name}">
+                    ${person.image ? `<img src="${person.image}" alt="${person.name}">` : ''}
                     <div class="person-info">
                         <div class="person-name">${person.name}</div>
                         <div class="person-id">${person.identifier}</div>
+                        <div class="person-id">Photos: ${person.embedding_count || 0}</div>
+                        <div class="unknown-actions">
+                            <button onclick="window.addPhotoToPerson(${person.id})" class="btn btn-primary btn-xs">Add Photo</button>
+                            <button onclick="window.capturePhotoForExistingPerson(${person.id})" class="btn btn-secondary btn-xs">Use Camera</button>
+                        </div>
                     </div>
                 </div>
             `).join('');
