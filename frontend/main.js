@@ -600,8 +600,10 @@ function drawRecognitionOverlay(data) {
         overlayCtx.shadowBlur = 0;
         
         // Draw label with better styling
-        const label = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
+        const trackLabel = face.track_id ? `ID:${face.track_id} ` : '';
+        const nameLabel = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
             `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
+        const label = `${trackLabel}${nameLabel}`;
         
         overlayCtx.font = 'bold 16px Arial';
         const metrics = overlayCtx.measureText(label);
@@ -733,8 +735,10 @@ function handleRecognitionResult(data) {
         ctx.strokeRect(sx, sy, sw, sh);
         
         // Draw label
-        const label = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
+        const trackLabel = face.track_id ? `ID:${face.track_id} ` : '';
+        const nameLabel = face.known ? `${face.name} (${(face.score * 100).toFixed(0)}%)` : 
             `Unknown${face.best_match_score ? ` (${(face.best_match_score * 100).toFixed(0)}%)` : ''}`;
+        const label = `${trackLabel}${nameLabel}`;
         ctx.font = 'bold 18px Arial';
         const textWidth = ctx.measureText(label).width;
         

@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
+from threading import Lock
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,15 +21,21 @@ import cv2
 from database import SessionLocal, init_db, Person, PersonEmbedding, Attendance, Unknown
 from recognition import FaceRecognizer
 from camera_manager import CameraManager, CameraType, camera_manager
+from tracker import FaceTracker
 
 # Configuration
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.6"))
 ATTENDANCE_WINDOW_MINUTES = int(os.getenv("ATTENDANCE_WINDOW_MINUTES", "30"))
 FACE_QUALITY_THRESHOLD = float(os.getenv("FACE_QUALITY_THRESHOLD", "0.7"))
 UNKNOWN_SIMILARITY_THRESHOLD = float(os.getenv("UNKNOWN_SIMILARITY_THRESHOLD", "0.5"))
+TRACKER_MAX_AGE = int(os.getenv("TRACKER_MAX_AGE", "10"))
+TRACKER_MIN_HITS = int(os.getenv("TRACKER_MIN_HITS", "1"))
+TRACKER_IOU_THRESHOLD = float(os.getenv("TRACKER_IOU_THRESHOLD", "0.3"))
 
-# Global recognizer instance
+# Global runtime state
 recognizer: Optional[FaceRecognizer] = None
+face_trackers: Dict[str, FaceTracker] = {}
+trackers_lock = Lock()
 logger = logging.getLogger("face_attendance_demo")
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -70,6 +77,8 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     camera_manager.close_all()
+    with trackers_lock:
+        face_trackers.clear()
     logger.info("Shutting down")
 
 app = FastAPI(
@@ -108,8 +117,28 @@ async def health_check():
         "model": "buffalo_l",
         "threshold": SIMILARITY_THRESHOLD,
         "gpu_enabled": gpu_info["using_gpu"],
-        "providers": gpu_info["providers"]
+        "providers": gpu_info["providers"],
+        "tracking": {
+            "enabled": True,
+            "active_streams": len(face_trackers),
+            "max_age": TRACKER_MAX_AGE,
+            "iou_threshold": TRACKER_IOU_THRESHOLD,
+        }
     }
+
+def update_tracked_faces(stream_id: str, faces: List[Dict]) -> List[Dict]:
+    """Attach stable temporary track IDs for one camera/browser stream."""
+    with trackers_lock:
+        tracker = face_trackers.get(stream_id)
+        if tracker is None:
+            tracker = FaceTracker(
+                max_age=TRACKER_MAX_AGE,
+                min_hits=TRACKER_MIN_HITS,
+                iou_threshold=TRACKER_IOU_THRESHOLD,
+            )
+            face_trackers[stream_id] = tracker
+            logger.info("Created face tracker stream_id=%s", stream_id)
+        return tracker.update(faces)
 
 def embedding_to_vector(embedding: np.ndarray) -> List[float]:
     """Convert InsightFace output into a pgvector-compatible float list."""
@@ -541,6 +570,7 @@ async def process_frame(file: UploadFile = File(...)):
         faces = recognizer.detect_faces(img)
         
         if not faces:
+            update_tracked_faces("browser", [])
             return {"faces": [], "message": "No faces detected"}
         
         db = SessionLocal()
@@ -567,8 +597,15 @@ async def process_frame(file: UploadFile = File(...)):
                     unk_id = save_unknown_face(db, img, bbox, embedding)
                     results.append(build_unknown_response(db, bbox, best_match, best_score, unk_id))
             
+            tracked_results = update_tracked_faces("browser", results)
+            logger.info(
+                "Processed browser frame detected=%s tracked=%s",
+                len(results),
+                len(tracked_results),
+            )
+            
             db.commit()
-            return {"faces": results}
+            return {"faces": tracked_results}
             
         finally:
             db.close()
@@ -989,6 +1026,7 @@ async def process_camera_frame(camera_id: str):
         faces = recognizer.detect_faces(process_frame)
         
         if not faces:
+            update_tracked_faces(f"camera:{camera_id}", [])
             return {
                 "faces": [], 
                 "message": "No faces detected", 
@@ -1029,9 +1067,17 @@ async def process_camera_frame(camera_id: str):
                     unk_id = save_unknown_face(db, frame, bbox, embedding)
                     results.append(build_unknown_response(db, bbox, best_match, best_score, unk_id))
             
+            tracked_results = update_tracked_faces(f"camera:{camera_id}", results)
+            logger.info(
+                "Processed camera frame camera_id=%s detected=%s tracked=%s",
+                camera_id,
+                len(results),
+                len(tracked_results),
+            )
+            
             db.commit()
             return {
-                "faces": results, 
+                "faces": tracked_results, 
                 "camera_id": camera_id,
                 "frame_size": {"width": original_width, "height": original_height}
             }
