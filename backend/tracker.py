@@ -14,17 +14,34 @@ import numpy as np
 class Track:
     id: int
     bbox: List[int]
+    velocity: List[float] = None
+    predicted_bbox: List[int] = None
     age: int = 0
     hits: int = 1
     missed: int = 0
 
+    def __post_init__(self) -> None:
+        if self.velocity is None:
+            self.velocity = [0.0, 0.0, 0.0, 0.0]
+        if self.predicted_bbox is None:
+            self.predicted_bbox = self.bbox.copy()
+
     def predict(self) -> List[int]:
         self.age += 1
         self.missed += 1
-        return self.bbox
+        self.predicted_bbox = [
+            int(round(value + self.velocity[index] * min(self.missed, 3)))
+            for index, value in enumerate(self.bbox)
+        ]
+        return self.predicted_bbox
 
     def update(self, bbox: List[int]) -> None:
+        self.velocity = [
+            float(new_value - old_value)
+            for new_value, old_value in zip(bbox, self.bbox)
+        ]
         self.bbox = bbox
+        self.predicted_bbox = bbox.copy()
         self.hits += 1
         self.missed = 0
 
@@ -96,7 +113,7 @@ class FaceTracker:
         iou_matrix = np.zeros((len(self.tracks), len(detection_boxes)), dtype=np.float32)
         for track_index, track in enumerate(self.tracks):
             for detection_index, bbox in enumerate(detection_boxes):
-                iou_matrix[track_index, detection_index] = self.iou(track.bbox, bbox)
+                iou_matrix[track_index, detection_index] = self.iou(track.predicted_bbox, bbox)
 
         matches: List[Tuple[int, int]] = []
         unmatched_tracks = set(range(len(self.tracks)))

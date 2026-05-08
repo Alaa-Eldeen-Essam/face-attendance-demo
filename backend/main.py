@@ -3,6 +3,7 @@ import io
 import base64
 import hashlib
 import logging
+import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -37,6 +38,8 @@ TRACK_IDENTITY_HISTORY = int(os.getenv("TRACK_IDENTITY_HISTORY", "5"))
 TRACK_IDENTITY_CONFIRM_FRAMES = int(os.getenv("TRACK_IDENTITY_CONFIRM_FRAMES", "3"))
 UNKNOWN_CONFIRM_FRAMES = int(os.getenv("UNKNOWN_CONFIRM_FRAMES", "5"))
 IDENTITY_LOCK_MIN_SCORE = float(os.getenv("IDENTITY_LOCK_MIN_SCORE", "0.50"))
+IDENTITY_LOCK_DECAY_FRAMES = int(os.getenv("IDENTITY_LOCK_DECAY_FRAMES", "10"))
+UNKNOWN_SUPPRESS_KNOWN_TRACKS = os.getenv("UNKNOWN_SUPPRESS_KNOWN_TRACKS", "true").lower() in {"1", "true", "yes"}
 
 # Global runtime state
 recognizer: Optional[FaceRecognizer] = None
@@ -61,6 +64,7 @@ class TrackIdentityState:
     unknown_id: Optional[int] = None
     last_seen_frame: int = 0
     last_logged_person_id: Optional[int] = None
+    lock_missed_frames: int = 0
 
 # Request/Response Models
 class AddPersonRequest(BaseModel):
@@ -147,6 +151,8 @@ async def health_check():
             "identity_confirm_frames": TRACK_IDENTITY_CONFIRM_FRAMES,
             "unknown_confirm_frames": UNKNOWN_CONFIRM_FRAMES,
             "identity_lock_min_score": IDENTITY_LOCK_MIN_SCORE,
+            "identity_lock_decay_frames": IDENTITY_LOCK_DECAY_FRAMES,
+            "unknown_suppress_known_tracks": UNKNOWN_SUPPRESS_KNOWN_TRACKS,
         }
     }
 
@@ -327,6 +333,7 @@ def apply_identity_smoothing(db, stream_id: str, tracked_faces: List[Dict], fram
             state.confirmed_person = confirmed
             state.confirmed_score = confirmed_score
             state.unknown_hits = 0
+            state.lock_missed_frames = 0
             record_attendance(
                 db,
                 confirmed["person_id"],
@@ -359,7 +366,40 @@ def apply_identity_smoothing(db, stream_id: str, tracked_faces: List[Dict], fram
                 )
                 state.last_logged_person_id = confirmed["person_id"]
         else:
-            state.unknown_hits = state.unknown_hits + 1 if candidate is None else 0
+            locked_person = None
+            if state.confirmed_person and state.lock_missed_frames < IDENTITY_LOCK_DECAY_FRAMES:
+                state.lock_missed_frames += 1
+                locked_person = state.confirmed_person
+
+            if locked_person:
+                response = {
+                    "known": True,
+                    "person_id": locked_person["person_id"],
+                    "name": locked_person["name"],
+                    "identifier": locked_person["identifier"],
+                    "bbox": [int(x) for x in bbox],
+                    "score": float(state.confirmed_score),
+                    "track_id": track_id,
+                    "track_age": face.get("track_age"),
+                    "track_hits": face.get("track_hits"),
+                    "identity_confirmed": True,
+                    "identity_locked": True,
+                    "identity_lock_missed_frames": state.lock_missed_frames,
+                    "identity_hits": confirm_hits,
+                }
+                logger.debug(
+                    "Track identity lock stream=%s track=%s person=%s missed=%s/%s",
+                    stream_id,
+                    track_id,
+                    locked_person["name"],
+                    state.lock_missed_frames,
+                    IDENTITY_LOCK_DECAY_FRAMES,
+                )
+                smoothed.append(response)
+                continue
+
+            suppress_unknown = UNKNOWN_SUPPRESS_KNOWN_TRACKS and state.confirmed_person is not None
+            state.unknown_hits = state.unknown_hits + 1 if candidate is None and not suppress_unknown else 0
             response = build_unknown_response(
                 db,
                 bbox,
@@ -375,6 +415,7 @@ def apply_identity_smoothing(db, stream_id: str, tracked_faces: List[Dict], fram
                 "identity_hits": confirm_hits,
                 "unknown_hits": state.unknown_hits,
                 "unknown_confirm_frames": UNKNOWN_CONFIRM_FRAMES,
+                "unknown_suppressed": suppress_unknown,
             })
 
             if face.get("candidate_name"):
@@ -385,7 +426,7 @@ def apply_identity_smoothing(db, stream_id: str, tracked_faces: List[Dict], fram
                     "threshold": SIMILARITY_THRESHOLD,
                 })
 
-            if state.unknown_hits >= UNKNOWN_CONFIRM_FRAMES and state.unknown_id is None:
+            if state.unknown_hits >= UNKNOWN_CONFIRM_FRAMES and state.unknown_id is None and not suppress_unknown:
                 state.unknown_id = save_unknown_face(db, frame, bbox, face["_embedding"])
                 response["unk_id"] = state.unknown_id
                 logger.info(
@@ -765,22 +806,35 @@ async def process_frame(file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="Recognizer not initialized")
     
     try:
+        frame_start = time.perf_counter()
+        decode_start = time.perf_counter()
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        decode_ms = (time.perf_counter() - decode_start) * 1000
         
         if img is None:
             raise HTTPException(status_code=400, detail="Invalid image format")
         
+        detect_start = time.perf_counter()
         faces = recognizer.detect_faces(img)
+        detect_ms = (time.perf_counter() - detect_start) * 1000
         
         if not faces:
             update_tracked_faces("browser", [])
             cleanup_identity_states("browser")
+            total_ms = (time.perf_counter() - frame_start) * 1000
+            logger.info(
+                "Frame stream=browser faces=0 total=%.1fms decode=%.1fms detect=%.1fms",
+                total_ms,
+                decode_ms,
+                detect_ms,
+            )
             return {"faces": [], "message": "No faces detected"}
         
         db = SessionLocal()
         try:
+            match_start = time.perf_counter()
             results = []
             for face in faces:
                 bbox = face['bbox']
@@ -788,15 +842,24 @@ async def process_frame(file: UploadFile = File(...)):
 
                 best_match, best_score = find_best_person_match(db, embedding)
                 results.append(build_candidate_response(bbox, best_match, best_score, embedding))
+            match_ms = (time.perf_counter() - match_start) * 1000
             
+            track_start = time.perf_counter()
             tracked_results = update_tracked_faces("browser", results)
             smoothed_results = apply_identity_smoothing(db, "browser", tracked_results, img)
+            track_ms = (time.perf_counter() - track_start) * 1000
+            total_ms = (time.perf_counter() - frame_start) * 1000
             logger.info(
-                "Processed browser frame detected=%s tracked=%s confirmed=%s pending=%s",
+                "Frame stream=browser faces=%s tracked=%s confirmed=%s pending=%s total=%.1fms decode=%.1fms detect=%.1fms match=%.1fms track=%.1fms",
                 len(results),
                 len(tracked_results),
                 sum(1 for face in smoothed_results if face.get("known")),
                 sum(1 for face in smoothed_results if not face.get("known")),
+                total_ms,
+                decode_ms,
+                detect_ms,
+                match_ms,
+                track_ms,
             )
             
             db.commit()
@@ -1203,9 +1266,11 @@ async def process_camera_frame(camera_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to get frame from camera {camera_id}")
     
     try:
+        frame_start = time.perf_counter()
         original_height, original_width = frame.shape[:2]
         
         # Smart resizing for processing
+        resize_start = time.perf_counter()
         process_frame = frame
         scale_factor = 1.0
         
@@ -1216,13 +1281,24 @@ async def process_camera_frame(camera_id: str):
             new_width = int(original_width * scale_factor)
             new_height = int(original_height * scale_factor)
             process_frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        resize_ms = (time.perf_counter() - resize_start) * 1000
         
         # Detect faces
+        detect_start = time.perf_counter()
         faces = recognizer.detect_faces(process_frame)
+        detect_ms = (time.perf_counter() - detect_start) * 1000
         
         if not faces:
             update_tracked_faces(f"camera:{camera_id}", [])
             cleanup_identity_states(f"camera:{camera_id}")
+            total_ms = (time.perf_counter() - frame_start) * 1000
+            logger.info(
+                "Frame stream=camera:%s faces=0 total=%.1fms resize=%.1fms detect=%.1fms",
+                camera_id,
+                total_ms,
+                resize_ms,
+                detect_ms,
+            )
             return {
                 "faces": [], 
                 "message": "No faces detected", 
@@ -1232,6 +1308,7 @@ async def process_camera_frame(camera_id: str):
         
         db = SessionLocal()
         try:
+            match_start = time.perf_counter()
             results = []
             for face in faces:
                 bbox = face['bbox']
@@ -1248,16 +1325,25 @@ async def process_camera_frame(camera_id: str):
 
                 best_match, best_score = find_best_person_match(db, embedding)
                 results.append(build_candidate_response(bbox, best_match, best_score, embedding))
+            match_ms = (time.perf_counter() - match_start) * 1000
             
+            track_start = time.perf_counter()
             tracked_results = update_tracked_faces(f"camera:{camera_id}", results)
             smoothed_results = apply_identity_smoothing(db, f"camera:{camera_id}", tracked_results, frame)
+            track_ms = (time.perf_counter() - track_start) * 1000
+            total_ms = (time.perf_counter() - frame_start) * 1000
             logger.info(
-                "Processed camera frame camera_id=%s detected=%s tracked=%s confirmed=%s pending=%s",
+                "Frame stream=camera:%s faces=%s tracked=%s confirmed=%s pending=%s total=%.1fms resize=%.1fms detect=%.1fms match=%.1fms track=%.1fms",
                 camera_id,
                 len(results),
                 len(tracked_results),
                 sum(1 for face in smoothed_results if face.get("known")),
                 sum(1 for face in smoothed_results if not face.get("known")),
+                total_ms,
+                resize_ms,
+                detect_ms,
+                match_ms,
+                track_ms,
             )
             
             db.commit()

@@ -5,6 +5,7 @@
 
 // Configuration
 const API_BASE = 'http://localhost:8000';
+const MIN_RECOGNITION_INTERVAL = 500;
 let recognitionInterval = 1000;
 let similarityThreshold = 0.6;
 
@@ -13,6 +14,8 @@ let stream = null;
 let recognitionTimer = null;
 let frameTimer = null;
 let isRecognizing = false;
+let recognitionInFlight = false;
+let remoteRecognitionInFlight = false;
 let capturedImageData = null;
 let currentUnknownId = null;
 let currentCameraSource = 'browser'; // browser, rtsp, http
@@ -95,7 +98,8 @@ function setupEventListeners() {
     elements.refreshAttendance.addEventListener('click', loadAttendance);
     
     elements.intervalInput.addEventListener('change', (e) => {
-        recognitionInterval = parseInt(e.target.value);
+        recognitionInterval = Math.max(parseInt(e.target.value, 10) || 1000, MIN_RECOGNITION_INTERVAL);
+        elements.intervalInput.value = recognitionInterval;
         if (isRecognizing) {
             stopRecognition();
             startRecognition();
@@ -385,6 +389,8 @@ function startRemoteCameraFrameFetch() {
 }
 
 async function processRemoteCameraFrame(blob) {
+    if (recognitionInFlight) return;
+    recognitionInFlight = true;
     try {
         const formData = new FormData();
         formData.append('file', blob, 'frame.jpg');
@@ -402,6 +408,8 @@ async function processRemoteCameraFrame(blob) {
         handleRecognitionResult(data);
     } catch (err) {
         console.error('Recognition error:', err);
+    } finally {
+        recognitionInFlight = false;
     }
 }
 
@@ -449,6 +457,8 @@ function toggleRecognitionMode() {
 
 function startRecognition() {
     isRecognizing = true;
+    recognitionInFlight = false;
+    remoteRecognitionInFlight = false;
     elements.toggleRecognition.textContent = 'Stop Recognition';
     elements.toggleRecognition.className = 'btn btn-warning';
     elements.status.textContent = elements.status.textContent.replace('Camera: On', 'Camera: On | Recognition: Active');
@@ -456,6 +466,7 @@ function startRecognition() {
     
     if (currentCameraSource === 'browser') {
         recognitionTimer = setInterval(captureAndRecognize, recognitionInterval);
+        captureAndRecognize();
     } else {
         // For RTSP/HTTP: stop separate frame fetching, start combined recognition
         if (frameTimer) {
@@ -468,6 +479,8 @@ function startRecognition() {
 
 function stopRecognition() {
     isRecognizing = false;
+    recognitionInFlight = false;
+    remoteRecognitionInFlight = false;
     if (recognitionTimer) {
         clearInterval(recognitionTimer);
         recognitionTimer = null;
@@ -496,10 +509,11 @@ function startRemoteCameraRecognition() {
     let fpsSum = 0;
     let fpsCount = 0;
     
-    // Reduced interval for smoother video
-    const fetchInterval = Math.max(recognitionInterval / 2, 100); // Min 100ms = 10 FPS max
+    const fetchInterval = Math.max(recognitionInterval, MIN_RECOGNITION_INTERVAL);
     
     frameTimer = setInterval(async () => {
+        if (remoteRecognitionInFlight) return;
+        remoteRecognitionInFlight = true;
         const startTime = Date.now();
         
         try {
@@ -574,6 +588,8 @@ function startRemoteCameraRecognition() {
                 elements.status.textContent = 'Camera: Error';
                 elements.status.className = 'status status-error';
             }
+        } finally {
+            remoteRecognitionInFlight = false;
         }
     }, fetchInterval);
 }
@@ -679,13 +695,18 @@ function startRemoteCameraFrameFetch() {
     }, fetchInterval);
 }
 async function captureAndRecognize() {
+    if (recognitionInFlight) return;
     if (!elements.video.videoWidth || !elements.video.videoHeight) return;
+    recognitionInFlight = true;
     
     const ctx = elements.capture.getContext('2d');
     ctx.drawImage(elements.video, 0, 0, elements.capture.width, elements.capture.height);
     
     elements.capture.toBlob(async (blob) => {
-        if (!blob) return;
+        if (!blob) {
+            recognitionInFlight = false;
+            return;
+        }
         
         try {
             const formData = new FormData();
@@ -706,6 +727,8 @@ async function captureAndRecognize() {
             console.error('Recognition error:', err);
             elements.status.textContent = `Error: ${err.message}`;
             elements.status.className = 'status status-error';
+        } finally {
+            recognitionInFlight = false;
         }
     }, 'image/jpeg', 0.8);
 }

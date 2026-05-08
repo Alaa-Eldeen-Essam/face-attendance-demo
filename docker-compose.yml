@@ -43,6 +43,8 @@ services:
       TRACK_IDENTITY_CONFIRM_FRAMES: "3"
       UNKNOWN_CONFIRM_FRAMES: "5"
       IDENTITY_LOCK_MIN_SCORE: "0.50"
+      IDENTITY_LOCK_DECAY_FRAMES: "10"
+      UNKNOWN_SUPPRESS_KNOWN_TRACKS: "true"
     volumes:
       - ./backend:/app
       - ./frontend:/frontend:ro
