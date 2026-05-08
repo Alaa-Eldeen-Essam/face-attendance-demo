@@ -29,8 +29,8 @@ services:
   # GPU-accelerated FastAPI Backend
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile.gpu
+      context: .
+      dockerfile: backend/Dockerfile.gpu
     container_name: face_attendance_backend
     depends_on:
       db:

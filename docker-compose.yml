@@ -21,8 +21,8 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: face_attendance_backend
     depends_on:
       db:
@@ -45,6 +45,7 @@ services:
       IDENTITY_LOCK_MIN_SCORE: "0.50"
     volumes:
       - ./backend:/app
+      - ./frontend:/frontend:ro
       - insightface_models:/root/.insightface
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:

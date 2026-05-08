@@ -18,3 +18,11 @@ node_modules/
 coverage/
 .pytest_cache/
 .tox/
+backend/.env
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+backend/__pycache__/
+backend/models/
+backend/request_performance.log
+frontend/node_modules/

@@ -17,7 +17,7 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy GPU-specific requirements
-COPY requirements-gpu-cu12.txt .
+COPY backend/requirements-gpu-cu12.txt .
 
 # Install GPU-accelerated packages
 RUN pip install --no-cache-dir -r requirements-gpu-cu12.txt
@@ -49,7 +49,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Copy application code
-COPY . .
+COPY backend/ /app/
+COPY frontend/ /frontend/
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

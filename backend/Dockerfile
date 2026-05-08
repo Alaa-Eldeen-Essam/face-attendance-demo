@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY backend/requirements.txt .
 
 # Install Python packages to user directory
 # Using --only-binary to prefer wheels (faster, no compilation needed)
@@ -50,7 +50,8 @@ ENV PATH=/root/.local/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1
 
 # Copy application code
-COPY . .
+COPY backend/ /app/
+COPY frontend/ /frontend/
 
 # Create non-root user for security (optional but recommended)
 # RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
