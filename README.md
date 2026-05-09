@@ -1,460 +1,398 @@
-# Facial Recognition Attendance System - Demo
+# Face Attendance Demo
 
-A lightweight, educational demo of a facial recognition attendance system using **InsightFace** for face detection/recognition and a simple HTML/JavaScript frontend.
+A real-time face attendance system built with FastAPI, InsightFace, PostgreSQL, pgvector, and a browser-based camera UI. The project supports live webcam recognition, multi-photo enrollment per person, vector search for face embeddings, attendance logging, unknown-face review, camera stream integration, and lightweight track-level identity smoothing.
 
-![Demo Banner](https://img.shields.io/badge/Status-Demo-orange) ![Python](https://img.shields.io/badge/Python-3.8+-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green)
+This repository is structured as a polished demo suitable for portfolio and CV discussion. It shows practical integration of computer vision, vector databases, backend APIs, frontend camera handling, Docker, and GPU-aware model execution.
 
-⚠️ **IMPORTANT: This is a demo/proof-of-concept only. Not production-ready. No authentication or security features.**
+## Highlights
 
-## Features
+- Real-time face detection and recognition with InsightFace `buffalo_l`.
+- PostgreSQL plus pgvector for 512-dimensional face embedding search.
+- Multiple face samples per person for more robust laptop-camera recognition.
+- Track IDs and identity smoothing to reduce flicker and single-frame misclassification.
+- Frontend overlay prediction for smoother bounding boxes between backend responses.
+- Attendance deduplication using a configurable time window.
+- Unknown-face capture, review, migration, and deletion.
+- Docker Compose stack with PostgreSQL, pgAdmin, and FastAPI backend.
+- Local GPU mode with ONNX Runtime CUDA provider support.
+- Configurable thresholds, tracking behavior, and recognition interval.
 
-- 🎥 **Real-time Face Detection** - Live webcam processing with bounding box overlays
-- 🧠 **InsightFace Recognition** - Buffalo_l model for accurate face embeddings
-- 📊 **Smart Attendance** - Automatic deduplication within configurable time windows
-- 💾 **SQLite Database** - Lightweight local storage for people and attendance records
-- 🎨 **Clean UI** - Vanilla HTML/JS/CSS interface, no frameworks required
-- ⚡ **FastAPI Backend** - Async endpoints for high performance
-- 🔗 **Integrated Frontend** - Backend automatically serves frontend at root URL
+## Tech Stack
 
-## Architecture Overview
+| Layer | Technology |
+| --- | --- |
+| Backend | FastAPI, Uvicorn, SQLAlchemy |
+| Face recognition | InsightFace, ONNX Runtime |
+| Vector search | PostgreSQL, pgvector |
+| Computer vision | OpenCV, NumPy |
+| Frontend | HTML, CSS, vanilla JavaScript, Canvas API |
+| Tracking | Lightweight IoU tracker with velocity prediction |
+| Deployment | Docker Compose, pgAdmin |
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         USER BROWSER                            │
-│                   http://localhost:8000                         │
-│                                                                 │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    │
-│  │   Webcam     │───▶│  Canvas      │───▶│   Overlay    │    │
-│  │   Stream     │    │  Capture     │    │   (Boxes)    │    │
-│  └──────────────┘    └──────┬───────┘    └──────────────┘    │
-│                              │                                  │
-│                              │ POST /process-frame/            │
-│                              ▼                                  │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               │ JPEG Frame
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      FASTAPI BACKEND                            │
-│                   (Python + Uvicorn)                            │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                    main.py                                │  │
-│  │  • Serves frontend at /                                   │  │
-│  │  • Handles API requests                                   │  │
-│  │  • Manages attendance logic                               │  │
-│  └────────────┬───────────────────────────┬──────────────────┘  │
-│               │                           │                     │
-│               ▼                           ▼                     │
-│  ┌──────────────────────┐    ┌──────────────────────┐         │
-│  │   recognition.py     │    │    database.py       │         │
-│  │                      │    │                      │         │
-│  │  ┌────────────────┐ │    │  ┌────────────────┐ │         │
-│  │  │  InsightFace   │ │    │  │  SQLAlchemy    │ │         │
-│  │  │  buffalo_l     │ │    │  │                │ │         │
-│  │  │  • Detect      │ │    │  │  Person        │ │         │
-│  │  │  • Extract     │ │    │  │  Attendance    │ │         │
-│  │  │  • Compare     │ │    │  │  Unknown       │ │         │
-│  │  └────────────────┘ │    │  └────────────────┘ │         │
-│  └──────────────────────┘    └──────────┬───────────┘         │
-│                                          │                     │
-│                                          ▼                     │
-│                              ┌──────────────────────┐          │
-│                              │  attendance_demo.db  │          │
-│                              │     (SQLite)         │          │
-│                              └──────────────────────┘          │
-└─────────────────────────────────────────────────────────────────┘
+## Current Architecture
+
+```text
+Browser UI
+  - Webcam capture
+  - Camera controls
+  - Canvas overlay
+  - Smooth client-side box prediction
+        |
+        | JPEG frames / API calls
+        v
+FastAPI backend
+  - InsightFace detection and embeddings
+  - pgvector nearest-neighbor matching
+  - Track-level identity smoothing
+  - Attendance and unknown-face logic
+        |
+        v
+PostgreSQL + pgvector
+  - persons
+  - person_embeddings
+  - attendance
+  - unknown_faces
 ```
 
 ## Project Structure
 
-```
+```text
 face-attendance-demo/
-├── backend/
-│   ├── main.py              # FastAPI application
-│   ├── models.py            # SQLAlchemy database models
-│   ├── database.py          # Database configuration
-│   ├── recognition.py       # InsightFace wrapper
-│   ├── requirements.txt     # Python dependencies
-│   ├── run_demo.sh          # Quick start script
-│   └── .env.example         # Configuration template
-├── frontend/
-│   ├── index.html           # Main UI
-│   ├── main.js              # Frontend logic
-│   └── styles.css           # Styling
-├── README.md                # This file
-└── .gitignore
+  backend/
+    main.py                    FastAPI application and API routes
+    recognition.py             InsightFace wrapper and provider selection
+    tracker.py                 Lightweight tracker with velocity prediction
+    database.py                PostgreSQL/pgvector setup
+    models.py                  SQLAlchemy models
+    cuda_dlls.py               Windows CUDA DLL path helper
+    requirements.txt           CPU Docker/runtime dependencies
+    requirements-gpu-cu12.txt  Local/GPU dependency set
+    Dockerfile                 CPU backend image
+    Dockerfile.gpu             GPU backend image
+  frontend/
+    index.html                 Browser UI
+    main.js                    Camera, API, and overlay logic
+    styles.css                 UI styling
+  docker-compose.yml           Local Docker stack: backend, db, pgAdmin
+  docker-compose.prod.yml      GPU-oriented Docker stack
+  init-db.sql                  pgvector extension initialization
 ```
 
-## Quick Start
+## Recommended Run Modes
 
-### Prerequisites
+### Option 1: Docker Stack
 
-- Python 3.8 or higher
-- Webcam
-- Internet connection (for initial model download)
+Use this when you want the whole stack in containers.
 
-### One-Command Startup (Easiest)
-
-From the project root directory:
-
-```bash
-# Linux/Mac
-chmod +x start_demo.sh
-./start_demo.sh
-
-# Windows
-start_demo.bat
+```powershell
+cd D:\DEBI\Hackathon\attendance_system_vision_project\face-attendance-demo
+docker compose up --build
 ```
 
-This script will:
-1. ✅ Create virtual environment
-2. ✅ Install all dependencies
-3. ✅ Start the backend server
-4. ✅ Serve the frontend automatically
+Open:
 
-Then just open **http://localhost:8000** in your browser!
-
-### Manual Setup (Alternative)
-
-### Manual Setup (Alternative)
-
-If you prefer to run commands manually:
-
-#### 1. Clone/Download
-
-```bash
-git clone <repository-url>
-cd face-attendance-demo
+```text
+Application: http://127.0.0.1:8000
+pgAdmin:     http://127.0.0.1:5050
 ```
 
-##### 2. Install Backend Dependencies
+pgAdmin login:
 
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+```text
+Email:    admin@example.com
+Password: admin
 ```
 
-**Note:** First run will download the InsightFace buffalo_l model (~150MB). This may take a few minutes.
+Database connection from pgAdmin:
 
-##### 3. Run Backend
-
-```bash
-# From backend directory
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```text
+Host:     db
+Port:     5432
+Database: attendance_demo
+Username: attendance
+Password: attendance
 ```
 
-The backend will start on `http://localhost:8000` and automatically serve the frontend.
+Stop the stack:
 
-#### 4. Access the Application
+```powershell
+docker compose down
+```
 
-Simply open your browser and visit: **http://localhost:8000**
+### Option 2: Docker Database + Local GPU Backend
 
-- Main App: `http://localhost:8000`
-- API Docs: `http://localhost:8000/docs`
-- Health Check: `http://localhost:8000/health`
+Use this when you want CUDA acceleration from your local Conda environment.
 
-#### 5. Initialize Demo Data
+Start PostgreSQL and pgAdmin:
 
-1. Click **"Seed Demo People"** button to create 4 sample people
-2. Click **"Start Camera"** to enable webcam
-3. Click **"Start Recognition"** to begin face detection
+```powershell
+cd D:\DEBI\Hackathon\attendance_system_vision_project\face-attendance-demo
+docker compose up -d db pgadmin
+```
 
-## Usage Guide
+Start the backend locally:
 
-### Basic Workflow
+```powershell
+cd D:\DEBI\Hackathon\attendance_system_vision_project\face-attendance-demo\backend
+conda activate hackathon_1_gpu
+uvicorn main:app --host 127.0.0.1 --port 8000
+```
 
-1. **Seed Demo People**: Creates sample personnel records with placeholder images
-2. **Start Camera**: Requests webcam permission and displays live feed
-3. **Start Recognition**: Begins processing frames at configured interval (default: 1000ms)
-4. **View Results**: 
-   - Green boxes = Recognized faces
-   - Red boxes = Unknown faces
-   - Attendance automatically logged for recognized faces
+This mode uses the `DATABASE_URL` in `backend/.env`, normally:
 
-### Configuration
+```text
+postgresql+psycopg2://attendance:attendance@localhost:5433/attendance_demo
+```
 
-Edit settings in the UI or via environment variables:
+### Option 3: GPU Docker
 
-**In-App Settings:**
-- **Frame Interval**: Time between recognition requests (100-5000ms)
-- **Threshold**: Similarity threshold for matches (0.0-1.0, default: 0.6)
+Use this only after Docker can access the NVIDIA GPU.
 
-**Environment Variables** (create `.env` file in backend/):
-```bash
-SIMILARITY_THRESHOLD=0.6
-FACE_QUALITY_THRESHOLD=0.7
+Verify GPU visibility:
+
+```powershell
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
+
+Start the GPU stack:
+
+```powershell
+cd D:\DEBI\Hackathon\attendance_system_vision_project\face-attendance-demo
+docker compose -f docker-compose.prod.yml up --build
+```
+
+Expected provider when GPU is working:
+
+```text
+CUDAExecutionProvider
+```
+
+If the app reports only `CPUExecutionProvider`, Docker is not exposing GPU access to the backend container or the ONNX Runtime CUDA provider cannot load the required libraries.
+
+## Application Workflow
+
+1. Open `http://127.0.0.1:8000`.
+2. Register a person using an uploaded photo or camera capture.
+3. Add multiple photos for the same person to improve recognition under different lighting, angles, and camera quality.
+4. Start the camera.
+5. Start recognition.
+6. The app detects faces, assigns temporary track IDs, searches pgvector for the nearest embedding, and confirms identity over multiple frames.
+7. Confirmed people are added to attendance automatically.
+8. Unknown faces are saved only after repeated unknown frames, reducing noise from single bad frames.
+9. Unknown faces can be migrated into a new or existing person record.
+
+## Recognition and Tracking Flow
+
+```text
+Frame captured by browser
+  -> FastAPI receives JPEG
+  -> InsightFace detects faces and extracts embeddings
+  -> pgvector nearest-neighbor search finds candidate identities
+  -> IoU tracker assigns track_id
+  -> identity smoothing confirms or rejects candidate identity
+  -> attendance or unknown-face action is applied
+  -> frontend renders predicted overlay boxes between backend responses
+```
+
+Tracking behavior:
+
+- `tracker.py` uses IoU matching plus simple velocity prediction.
+- Each detection receives a stable `track_id` while it remains visible.
+- Identity confirmation uses a short rolling history per track.
+- Confirmed known tracks are protected from being immediately saved as unknown when a few frames are weak.
+- Frontend overlay boxes are animated with short-term prediction to reduce visual lag.
+
+## Configuration
+
+Main runtime settings live in `backend/.env` and Docker Compose environment variables.
+
+```env
+SIMILARITY_THRESHOLD=0.45
+FACE_QUALITY_THRESHOLD=0.5
 ATTENDANCE_WINDOW_MINUTES=30
+UNKNOWN_SIMILARITY_THRESHOLD=0.5
+
+TRACKER_MAX_AGE=10
+TRACKER_MIN_HITS=1
+TRACKER_IOU_THRESHOLD=0.3
+
+TRACK_IDENTITY_HISTORY=5
+TRACK_IDENTITY_CONFIRM_FRAMES=3
+UNKNOWN_CONFIRM_FRAMES=5
+IDENTITY_LOCK_MIN_SCORE=0.50
+IDENTITY_LOCK_DECAY_FRAMES=10
+UNKNOWN_SUPPRESS_KNOWN_TRACKS=true
+
+DATABASE_URL=postgresql+psycopg2://attendance:attendance@localhost:5433/attendance_demo
+RESET_DATABASE_ON_START=false
+INSIGHTFACE_MODEL=buffalo_l
 ```
 
-### Smart Attendance Logic
+Important tuning notes:
 
-The system prevents duplicate attendance entries:
-- If a person was detected < 30 minutes ago, no new entry is created
-- Configurable via `ATTENDANCE_WINDOW_MINUTES`
-- Each entry has `arrival_time` and optional `departure_time`
+- Lower `SIMILARITY_THRESHOLD` accepts weaker matches but increases false positives.
+- Increase `TRACK_IDENTITY_CONFIRM_FRAMES` for stricter identity confirmation.
+- Increase `UNKNOWN_CONFIRM_FRAMES` to reduce unknown-face noise.
+- Keep browser recognition interval around `500-1000ms` for a good balance between latency and CPU/GPU load.
 
-## API Endpoints
+## API Overview
 
-### Core Endpoints
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Redirects to the frontend |
+| `GET` | `/health` | Model, provider, and tracking status |
+| `POST` | `/add-person/` | Add a person from uploaded photo |
+| `POST` | `/capture-person/` | Add a person from camera/base64 image |
+| `POST` | `/people/{person_id}/embeddings` | Add another photo/embedding to an existing person |
+| `GET` | `/people/` | List registered people and embedding counts |
+| `POST` | `/process-frame/` | Process a browser camera frame |
+| `POST` | `/compare-image/` | Compare an uploaded image |
+| `GET` | `/attendance/` | List attendance records |
+| `GET` | `/unknown-faces/` | List unknown faces |
+| `POST` | `/migrate-unknown/` | Convert unknown face to new or existing person |
+| `DELETE` | `/unknown-faces/{unknown_id}` | Delete an unknown face |
+| `DELETE` | `/clear-data/` | Clear demo data |
+| `POST` | `/cameras/add` | Add RTSP/HTTP/file camera source |
+| `GET` | `/cameras/{camera_id}/get-frame` | Fetch current remote-camera frame |
+| `POST` | `/process-camera-frame/{camera_id}` | Process a remote-camera frame |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/` | Health check |
-| POST | `/seed-demo/` | Seed demo people |
-| POST | `/process-frame/` | Process video frame for recognition |
-| GET | `/people/` | List all known people |
-| GET | `/attendance/` | List attendance records |
-| DELETE | `/clear-data/` | Clear all data |
+Interactive API docs are available at:
 
-### Example: Process Frame
-
-```bash
-curl -X POST "http://localhost:8000/process-frame/" \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@frame.jpg"
+```text
+http://127.0.0.1:8000/docs
 ```
 
-Response:
+## Database Model
+
+The schema is created automatically at startup.
+
+Core tables:
+
+- `persons`: registered identities.
+- `person_embeddings`: multiple image samples and 512-dimensional face embeddings per person.
+- `attendance`: arrival/departure-style attendance records.
+- `unknown_faces`: saved unknown face crops and embeddings for review.
+
+Vector indexes:
+
+- `person_embeddings_embedding_hnsw_idx`
+- `unknown_faces_embeddings_hnsw_idx`
+
+## Camera Support
+
+Supported sources:
+
+- Browser webcam through `getUserMedia`.
+- HTTP/MJPEG streams through OpenCV.
+- RTSP streams through OpenCV/FFmpeg.
+- Local video files if mounted into the backend environment.
+
+When running in Docker, remote camera URLs must be reachable from inside the backend container. A stream that works in a desktop browser may still fail in Docker if DNS, routing, authentication, or OpenCV's video backend cannot access it.
+
+Useful diagnostics:
+
+```powershell
+docker compose logs --tail=50 backend
+docker compose exec backend python -c "import cv2; print(cv2.getBuildInformation())"
+docker compose exec backend python -c "import socket; print(socket.gethostbyname('example.com'))"
+```
+
+## GPU Notes
+
+Local Windows GPU mode uses:
+
+- Python 3.11 Conda environment.
+- `onnxruntime-gpu[cuda,cudnn]`.
+- `cuda_dlls.py` to help Windows find CUDA/cuDNN DLLs installed by NVIDIA Python packages.
+
+Health output should show:
+
 ```json
 {
-  "faces": [
-    {
-      "known": true,
-      "person_id": 1,
-      "name": "Ahmed Hassan",
-      "identifier": "MIL-001",
-      "bbox": [100, 150, 200, 250],
-      "score": 0.87
-    }
-  ]
+  "gpu_enabled": true,
+  "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"]
 }
 ```
 
-## Technical Details
+Docker CPU mode is expected to show:
 
-### Face Recognition Pipeline
-
-1. **Detection**: InsightFace detects faces in frame
-2. **Embedding**: 512-dimensional face embedding extracted
-3. **Matching**: Cosine similarity against known embeddings
-4. **Threshold**: Matches above threshold are considered recognized
-5. **Logging**: Attendance record created/updated
-
-### Database Schema
-
-**Person Table:**
-- `id`: Primary key
-- `name`: Person's name
-- `identifier`: Unique ID (e.g., employee/military ID)
-- `image_data`: Stored face photo (BLOB)
-- `embeddings`: 512-float face embedding (BLOB)
-- `created_at`: Timestamp
-- `deleted`: Soft delete flag
-
-**Attendance Table:**
-- `id`: Primary key
-- `person_id`: Foreign key to Person
-- `name`: Denormalized for quick queries
-- `identifier`: Denormalized
-- `arrival_time`: Entry timestamp
-- `departure_time`: Exit timestamp (nullable)
-- `auto`: Auto-detected vs manual entry
-- `created_at`: Record creation time
-
-**Unknown Table:**
-- `id`: Primary key
-- `image_data`: Face crop of unknown person
-- `embeddings`: Face embedding
-- `detected_at`: Detection timestamp
-
-### Model Information
-
-**InsightFace Buffalo_L:**
-- 512-dimensional embeddings
-- High accuracy for face recognition
-- ~150MB download on first run
-- Stored in `~/.insightface/models/`
-
-## Limitations & Known Issues
-
-⚠️ **This is a DEMO - Known Limitations:**
-
-1. **No Authentication**: Backend has no access control
-2. **No HTTPS**: Unencrypted communication
-3. **Demo Embeddings**: Seeded people use random embeddings (for real use, upload actual face photos)
-4. **Single-Face Optimization**: Works best with one face in frame
-5. **Lighting Sensitivity**: Performance degrades in poor lighting
-6. **No Persistence**: Data lost if database file deleted
-7. **CPU-Only**: No GPU acceleration configured (can be enabled)
+```json
+{
+  "gpu_enabled": false,
+  "providers": ["CPUExecutionProvider"]
+}
+```
 
 ## Troubleshooting
 
-### Camera Not Working
+### Frontend returns 404
 
-- **Check permissions**: Ensure browser has webcam access
-- **HTTPS required**: Some browsers require HTTPS for getUserMedia (use localhost exemption)
-- **Wrong device**: Camera might be occupied by another app
+Rebuild after Dockerfile or frontend path changes:
 
-### Model Download Issues
-
-```bash
-# Manual model download
-mkdir -p ~/.insightface/models/buffalo_l
-# Download from: https://github.com/deepinsight/insightface/releases
+```powershell
+docker compose down
+docker compose up --build
 ```
 
-### Poor Recognition Accuracy
+Then hard-refresh the browser:
 
-- Ensure good lighting
-- Face should be clearly visible and front-facing
-- Adjust `SIMILARITY_THRESHOLD` (lower = more lenient)
-- Use real face photos instead of demo placeholders
-
-### CORS Errors
-
-- Run frontend via HTTP server instead of file://
-- Or configure backend to serve frontend:
-  ```python
-  app.mount("/", StaticFiles(directory="../frontend", html=True))
-  ```
-
-## Advanced Configuration
-
-### GPU Acceleration
-
-Edit `backend/recognition.py`:
-
-```python
-self.app = FaceAnalysis(
-    name=model_name,
-    providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
-)
+```text
+Ctrl + F5
 ```
 
-Requires: `pip install onnxruntime-gpu`
+### Docker cannot access GPU
 
-### Custom Model
+Run:
 
-Change model in `backend/recognition.py`:
-
-```python
-recognizer = FaceRecognizer(model_name="buffalo_sc")  # Smaller, faster
+```powershell
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 ```
 
-Available models: `buffalo_l`, `buffalo_sc`, `buffalo_s`
+If this fails, fix Docker Desktop GPU/WSL/NVIDIA runtime first.
 
-### Production Deployment
+### RTSP or HTTP camera fails
 
-**DO NOT use this demo in production without:**
+Check whether the container can resolve and open the stream:
 
-1. Adding authentication (OAuth2, JWT)
-2. Implementing HTTPS/TLS
-3. Adding rate limiting
-4. Implementing proper error handling
-5. Adding logging and monitoring
-6. Database migrations (Alembic)
-7. Input validation and sanitization
-8. Privacy controls (GDPR compliance)
-9. Audit trails
-10. Secure credential storage
-
-## Development
-
-### Running Tests
-
-```bash
-cd backend
-pytest tests/
+```powershell
+docker compose exec backend python -c "import socket; print(socket.gethostbyname('your-hostname'))"
+docker compose exec backend python -c "import cv2; url='YOUR_URL'; cap=cv2.VideoCapture(url); print(cap.isOpened()); ok, frame=cap.read(); print(ok, None if frame is None else frame.shape)"
 ```
 
-### Project Dependencies
+Public camera streams can be unstable or reject repeated clients.
 
-- **FastAPI**: Web framework
-- **InsightFace**: Face recognition
-- **OpenCV**: Image processing
-- **SQLAlchemy**: ORM for database
-- **Uvicorn**: ASGI server
+### Recognition is unstable
 
-## Resources
+Recommended actions:
 
-- [InsightFace Documentation](https://github.com/deepinsight/insightface)
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [SQLAlchemy Documentation](https://docs.sqlalchemy.org/)
+1. Add multiple photos per person.
+2. Use better lighting and keep the face centered.
+3. Keep recognition interval at `500-1000ms`.
+4. Tune `SIMILARITY_THRESHOLD` and `IDENTITY_LOCK_MIN_SCORE`.
+5. Use local GPU mode for faster feedback.
 
-## License
+## Security and Production Notes
 
-This is a demo project for educational purposes. Use at your own risk.
+This is a demo/portfolio project, not a production access-control system.
 
-## Contributing
+Before production use, add:
 
-This is a demo/learning project. Feel free to fork and modify for your own learning!
+- Authentication and authorization.
+- HTTPS and secure CORS settings.
+- Audit logging.
+- Data retention and deletion policies.
+- Encrypted secrets management.
+- Model and threshold validation for the target environment.
+- Consent and privacy controls for biometric data.
 
-## Acknowledgments
+## CV Summary
 
-- InsightFace team for the excellent face recognition models
-- FastAPI for the modern Python web framework
+This project demonstrates:
 
----
-
-**Setup Time:** ~15 minutes including dependencies
-
-**Questions?** Check the API docs at `http://localhost:8000/docs` or review the code comments.
-
----
-
-## 📥 File Download Instructions
-
-All files mentioned in this README are provided as separate artifacts in this conversation. To set up the project:
-
-### Method 1: Copy Files Individually
-1. Create the directory structure as shown in "Project Structure"
-2. Copy each file content from the artifacts into the corresponding file
-3. Ensure proper file names and extensions
-
-### Method 2: Complete File List
-
-**Root Directory Files:**
-- `start_demo.sh` - Startup script for Linux/Mac
-- `start_demo.bat` - Startup script for Windows  
-- `README.md` - This documentation
-- `PROJECT_STRUCTURE.md` - Architecture guide
-- `QUICK_REFERENCE.md` - Quick reference
-- `.gitignore` - Git exclusions
-
-**backend/ Files:**
-- `backend/main.py` - FastAPI application
-- `backend/models.py` - Database models
-- `backend/database.py` - Database config
-- `backend/recognition.py` - Face recognition
-- `backend/requirements.txt` - Dependencies
-- `backend/run_demo.sh` - Backend startup
-- `backend/.env.example` - Config template
-
-**frontend/ Files:**
-- `frontend/index.html` - UI page
-- `frontend/main.js` - JavaScript logic
-- `frontend/styles.css` - Styling
-
-**Total: 16 core files** (19 including documentation)
-
-### Quick Setup Commands
-
-```bash
-# Create directory structure
-mkdir -p face-attendance-demo/backend
-mkdir -p face-attendance-demo/frontend
-
-# Copy files to their locations
-# (Copy each artifact content to the corresponding file)
-
-# Make scripts executable (Linux/Mac)
-chmod +x face-attendance-demo/start_demo.sh
-chmod +x face-attendance-demo/backend/run_demo.sh
-
-# Run the demo
-cd face-attendance-demo
-./start_demo.sh
-```
+- Computer vision application development with InsightFace and OpenCV.
+- Vector similarity search using PostgreSQL and pgvector.
+- Real-time API design with FastAPI.
+- Browser camera integration and Canvas overlay rendering.
+- Lightweight object tracking and temporal identity smoothing.
+- Dockerized service orchestration with PostgreSQL and pgAdmin.
+- GPU-aware ONNX Runtime deployment and fallback handling.
